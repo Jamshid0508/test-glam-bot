@@ -1,0 +1,13 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+cloudflared.log
+data/*.db
+data/tmp/
+
+.vercel
+*.sqlite3
+.ruff_cache/
+.agents/
+skills-lock.json
