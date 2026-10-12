@@ -11,3 +11,5 @@ data/tmp/
 .ruff_cache/
 .agents/
 skills-lock.json
+
+.vercel

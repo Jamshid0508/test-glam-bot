@@ -16,9 +16,9 @@ pip install -r requirements.txt
 
 `.env.example` faylidan `.env` yarating va o'zingizning Telegram hamda Gemini
 qiymatlaringizni kiriting. `TELEGRAM_ADMIN_ID` bot va web paneldan foydalanishga
-ruxsat berilgan yagona Telegram akkauntini belgilaydi; uni o'zingizning raqamli
-Telegram foydalanuvchi ID'ingizga almashtiring. Bot boshqa akkauntlarning buyruq,
-matn, ovoz va tugma so'rovlarini qabul qilmaydi.
+ruxsat berilgan admin Telegram akkauntini belgilaydi; uni o'zingizning raqamli
+Telegram foydalanuvchi ID'ingizga almashtiring. Sotuvchilar admin yaratgan
+login/parol bilan kiradi va birinchi kirishda Telegram akkauntini bog'laydi.
 Mahalliy ishga tushirishda `DATABASE_URL` bo'sh qolsa, SQLite ishlatiladi.
 
 `GEMINI_API_KEYS` ichidagi kalitlarni vergul, nuqtali vergul yoki bo'sh joy bilan
@@ -99,30 +99,19 @@ Faqat `DATABASE_URL` bo'sh bo'lgandagina `data/glam.db` SQLite ishlatiladi.
      panel manzilini avtomatik aniqlaydi
    - `GEMINI_MODEL` — ixtiyoriy, berilmasa `gemini-2.5-flash` ishlatiladi
 
-3. O'zgaruvchilarni qo'shgach, Vercel'da qayta deploy qiling. Vercel production
-   domeni `/panel` sahifasini taqdim etadi. Bot ishga tushganda pastdagi Telegram
-   **Menu** tugmasi **Web panel** web-app menyu tugmasiga aylanadi va bosilganda
-   panelni ochadi. Vercel `VERCEL_PROJECT_PRODUCTION_URL` bermasa, `WEB_APP_URL`
-   ga `https://<deploy-domeni>/panel` ni kiriting.
-4. Deploy URL'i ma'lum bo'lgach, Telegram webhook'ni bir marta o'rnating.
-   PowerShell'da token, webhook URL (`https://<deploy-url>/webhook`) va
-   `WEBHOOK_SECRET` qiymatlarini so'ralganda kiriting:
-
-   ```powershell
-   $token = Read-Host "Telegram bot token"
-   $url = Read-Host "Webhook URL"
-   $secret = Read-Host "WEBHOOK_SECRET"
-   Invoke-RestMethod -Method Post `
-     -Uri "https://api.telegram.org/bot$token/setWebhook" `
-     -Body @{ url = $url; secret_token = $secret }
-   ```
-
-   `{"ok":true,"result":true,...}` javobi webhook o'rnatilganini bildiradi.
-   Vercel'dagi `WEBHOOK_SECRET` bilan Telegram'ga yuborilgan `secret_token`
-   aynan bir xil bo'lishi kerak.
+3. Production sozlamalarida `BOT_TOKEN`, `WEBHOOK_SECRET` va
+   `TELEGRAM_ADMIN_ID` aynan ishlatmoqchi bo'lgan Telegram bot hamda admin
+   akkauntiga tegishli ekanini tekshirib, o'zgaruvchilarni qo'shgach qayta deploy
+   qiling. Production'dagi birinchi so'rovda ilova `/webhook` Telegram webhook'ini
+   avtomatik ravishda production domeniga sozlaydi; Preview deploy'lari production
+   webhook'ini o'zgartirmaydi. Vercel production domeni `/panel` sahifasini beradi.
+   **Menu** tugmasi **Web panel** web-app menyu tugmasiga aylanadi va panelni ochadi.
+   `VERCEL_PROJECT_PRODUCTION_URL` bo'lmasa, `WEB_APP_URL` ga
+   `https://<deploy-domeni>/panel` ni kiriting.
 
 Root URL (`https://<deploy-url>/`) sog'liq tekshiruvi uchun `{"status":"ok"}`
-qaytaradi. Mahalliy polling rejimiga qaytishdan avval webhook'ni o'chiring:
+qaytaradi. Mahalliy polling rejimiga qaytishdan avval webhook'ni Telegram bot
+tokeningiz bilan o'chiring:
 
 ```powershell
 Invoke-RestMethod -Method Post -Uri "https://api.telegram.org/bot<token>/deleteWebhook"
@@ -197,8 +186,9 @@ yuborish kifoya, qolgan parametrlar saqlanadi.
 ## Web panel
 
 Telegram ichida **🌐 Web panel** tugmasini oching. Kirish Telegram `initData`
-imzosi orqali tekshiriladi va faqat `TELEGRAM_ADMIN_ID` dagi akkauntga ruxsat
-beriladi. Oddiy brauzerdan ochilganda ma'lumotlar ko'rsatilmaydi.
+imzosi orqali tekshiriladi. Admin barcha bo'limlarni ko'radi; Telegram'da
+bog'langan sotuvchi esa faqat o'ziga biriktirilgan do'konni ko'radi. Oddiy
+brauzerdan login/parol bilan kirish ham mumkin.
 
 - Kun yoki tanlangan sana oralig'i bo'yicha sotuv soni, tushum va foyda.
 - Ombordagi gilamlarni qidirish, qo'shish, tahrirlash va arxivlash.
@@ -228,8 +218,9 @@ hisoblanadi; so'm ekvivalenti joriy dollar kursidan olinadi. Ovozda kirim yoki
 sotuv amali aniq aytilmagan bo'lsa, bot
 hisobni ko'rsatib, **Omborga qo'shish** yoki **Sotish** tugmasini chiqaradi;
 sotuv faqat tugma bosilgandan keyin bajariladi. Miqdor aniq aytilmaganida
-amalni tanlash tugmalari berilmaydi. Narx aytilmasa, uni paneldagi gilam
-tahrirlash formasidan kiritish mumkin. Ko'p so'zli nomlar (masalan,
+amalni tanlash tugmalari berilmaydi. Sotish narxi aytilmasa, bot uni so'raydi;
+narx kiritilgach saqlashdan oldingi tasdiqlash bosqichi ko'rsatiladi. Ko'p
+so'zli nomlar (masalan,
 "Katta Qizil Gul") saqlanadi va bot ularni to'liq nom bo'yicha solishtiradi.
 
 Sinovlar:
@@ -250,9 +241,13 @@ raqami biriktiriladi va shu raqam tizimga kiritiladi).
   sotuvchilar qo'shadi. Foydalanuvchi botda /start bosib login/parolni bir
   marta kiritsa, Telegram akkaunti bog'lanadi. `TELEGRAM_ADMIN_ID` egasi
   (asosiy admin) avvalgidek to'g'ridan-to'g'ri kiradi.
-- **Sotuvchi** o'z do'konida: kirim qilish (raqamlar bilan), raqam orqali
-  sotish, kunlik savdosini ko'rish huquqiga ega. Boshqa do'kon va admin
-  bo'limlari unga yopiq.
+- **Sotuvchi** o'z do'konida bot orqali omborni ko'rish, raqam bilan sotish,
+  raqamli gilam kiritish va bugungi savdosini ko'rish huquqiga ega. Web panelda
+  faqat o'z do'koni, raqam bilan sotish/kirim va bugungi shaxsiy savdosi
+  ko'rinadi. Foydalanuvchilarni boshqarish, narx/foyda tafsilotlari va admin
+  bo'limlari panel hamda API'da yopiq. Do'kon nomi bot menyusiga kirishda va
+  web panel sarlavhasida ko'rsatiladi. Raqam qo'shishda avval mavjud gilam
+  tanlanadi, so'ng oddiy yorliq raqamlari (masalan: `010, 011`) kiritiladi.
 - **Kunlik hisob-kitob:** admin botda «💰 Hisob-kitob» yoki panelda shu
   bo'limda sotuvchining kunlik savdosini ko'radi va topshirilgan summani
   kiritadi. Kam topshirilsa, yetishmagan summa **sana bilan qarz** bo'lib

@@ -37,6 +37,16 @@ async def lifespan(app: FastAPI):
     telegram_application = build_application()
     await telegram_application.initialize()
     await bot.configure_web_app_menu(telegram_application)
+    if os.getenv("VERCEL_ENV") == "production":
+        production_url = os.getenv("VERCEL_PROJECT_PRODUCTION_URL", "").strip()
+        if not production_url:
+            raise RuntimeError(
+                "Vercel VERCEL_PROJECT_PRODUCTION_URL environment variable is required"
+            )
+        await telegram_application.bot.set_webhook(
+            url=f"https://{production_url}/webhook",
+            secret_token=WEBHOOK_SECRET,
+        )
     await telegram_application.start()
     app.state.telegram_application = telegram_application
     try:
@@ -51,8 +61,17 @@ app = FastAPI(lifespan=lifespan)
 
 
 def verify_telegram_init_data(init_data: str, bot_token: str, admin_id: str):
-    if not init_data or not bot_token or not admin_id.isdigit():
+    if not admin_id.isdigit():
         raise HTTPException(status_code=503, detail="Web panel admin configuration is missing")
+    user = verify_telegram_webapp_data(init_data, bot_token)
+    if int(user["id"]) != int(admin_id):
+        raise HTTPException(status_code=403, detail="This Telegram account is not an admin")
+    return user
+
+
+def verify_telegram_webapp_data(init_data: str, bot_token: str):
+    if not init_data or not bot_token:
+        raise HTTPException(status_code=503, detail="Telegram bot configuration is missing")
     values = dict(parse_qsl(init_data, keep_blank_values=True))
     received_hash = values.pop("hash", "")
     if not received_hash:
@@ -84,8 +103,6 @@ def verify_telegram_init_data(init_data: str, bot_token: str, admin_id: str):
     current_time = int(datetime.now().timestamp())
     if auth_date > current_time + 60 or current_time - auth_date > 86400:
         raise HTTPException(status_code=401, detail="Telegram authorization data has expired")
-    if user_id != int(admin_id):
-        raise HTTPException(status_code=403, detail="This Telegram account is not an admin")
     return user
 
 
@@ -139,10 +156,32 @@ def panel_user(request: Request):
 
 
 def require_panel_user(request: Request):
-    """Any panel account: session user (admin or seller) or Telegram admin."""
+    """Any panel account: session user or a linked Telegram account."""
     user = panel_user(request)
     if user:
         return user
+    authorization = request.headers.get("Authorization", "")
+    if authorization.startswith("tma "):
+        telegram_user = verify_telegram_webapp_data(
+            authorization[4:],
+            BOT_TOKEN,
+        )
+        telegram_id = int(telegram_user["id"])
+        if current_admin_id().isdigit() and telegram_id == int(current_admin_id()):
+            return {
+                "id": None,
+                "login": "admin",
+                "display_name": telegram_user.get("first_name") or "Admin",
+                "role": "admin",
+                "store_id": None,
+            }
+        account = bot.get_user_by_telegram(telegram_id)
+        if account:
+            return account
+        raise HTTPException(
+            status_code=403,
+            detail="Avval botda login/parol bilan kiring va profilni Telegram’ga ulang",
+        )
     telegram_admin = require_admin(request)
     return {
         "id": None,
@@ -151,6 +190,16 @@ def require_panel_user(request: Request):
         "role": "admin",
         "store_id": None,
     }
+
+
+def require_seller_store(user: dict) -> int:
+    store_id = user.get("store_id")
+    if store_id is None:
+        raise HTTPException(
+            status_code=403,
+            detail="Hisobingizga do‘kon biriktirilmagan. Administratorga murojaat qiling.",
+        )
+    return int(store_id)
 
 
 def current_admin_id() -> str:
@@ -298,6 +347,16 @@ def product_dict(row, rate: float | None = None):
     return item
 
 
+def seller_product_dict(row):
+    item = row_dict(row)
+    if item is None:
+        return None
+    return {
+        key: item.get(key)
+        for key in ("id", "name", "unit", "quantity", "archived_at")
+    }
+
+
 def movement_dict(row):
     item = row_dict(row)
     if item is not None:
@@ -441,7 +500,16 @@ async def api_dashboard(request: Request, start: str | None = None, end: str | N
 async def api_products(request: Request, archived: bool = False, store_id: int | None = None):
     user = require_panel_user(request)
     if user["role"] == "seller":
-        store_id = user.get("store_id") or bot.main_store_id()
+        store_id = require_seller_store(user)
+        archived = False
+        return [
+            seller_product_dict(row)
+            for row in bot.inventory_list_full(
+                include_archived=archived,
+                limit=1000,
+                store_id=store_id,
+            )
+        ]
     rate = bot.get_usd_rate()
     return [
         product_dict(row, rate)
@@ -480,10 +548,16 @@ async def api_create_product(request: Request):
     purchase_price_usd = as_number(payload.get("purchase_price_usd"), "purchase_price_usd", nullable=True)
     store_id = payload.get("store_id")
     if user["role"] == "seller":
-        store_id = user.get("store_id") or bot.main_store_id()
+        store_id = require_seller_store(user)
     item_numbers = payload.get("item_numbers") or None
     if isinstance(item_numbers, str):
         item_numbers = [n for n in item_numbers.replace("\n", ",").split(",") if n.strip()]
+    if user["role"] == "seller":
+        if unit != "dona" or not item_numbers:
+            raise HTTPException(
+                status_code=422,
+                detail="Sotuvchi gilamni faqat yorliq raqamlari bilan qo‘sha oladi",
+            )
     quantity = as_number(payload.get("quantity", 0), "quantity")
     if item_numbers:
         quantity = float(len(item_numbers))
@@ -510,7 +584,11 @@ async def api_create_product(request: Request):
                 detail="Bu gilam nomi bazada bor. Mavjud gilamni tahrirlang.",
             ) from error
         raise
-    return product_dict(product)
+    return (
+        seller_product_dict(product)
+        if user["role"] == "seller"
+        else product_dict(product)
+    )
 
 
 @app.patch("/api/products/{product_id}")
@@ -761,7 +839,7 @@ async def api_stores(request: Request):
     user = require_panel_user(request)
     stores = [dict(row) for row in bot.list_stores()]
     if user["role"] == "seller":
-        own = user.get("store_id") or bot.main_store_id()
+        own = require_seller_store(user)
         stores = [s for s in stores if s["id"] == own]
     return stores
 
@@ -770,11 +848,43 @@ async def api_stores(request: Request):
 async def api_items(request: Request, store_id: int | None = None):
     user = require_panel_user(request)
     if user["role"] == "seller":
-        store_id = user.get("store_id") or bot.main_store_id()
+        store_id = require_seller_store(user)
     if store_id is None:
         branch = bot.branch_store()
         store_id = branch["id"] if branch else bot.main_store_id()
-    return [dict(row) for row in bot.list_items(store_id)]
+    rows = bot.list_items(store_id)
+    if user["role"] == "seller":
+        return [
+            {
+                key: item[key]
+                for key in (
+                    "id",
+                    "number",
+                    "product_name",
+                    "status",
+                    "created_at",
+                    "sold_at",
+                )
+                if key in item
+            }
+            for item in (dict(row) for row in rows)
+        ]
+    return [dict(row) for row in rows]
+
+
+@app.get("/api/my/sales/today")
+async def api_my_today_sales(request: Request):
+    user = require_panel_user(request)
+    if user["role"] != "seller":
+        raise HTTPException(status_code=403, detail="Bu bo‘lim faqat sotuvchilar uchun")
+    store_id = require_seller_store(user)
+    today = datetime.now(SHOP_TIMEZONE).date().isoformat()
+    summary = bot.store_day_sales(store_id, today, user["id"])
+    return {
+        "date": today,
+        "sales_count": summary["sales_count"],
+        "revenue": summary["revenue"],
+    }
 
 
 @app.post("/api/branch/sell")
@@ -786,7 +896,7 @@ async def api_branch_sell(request: Request):
         raise HTTPException(status_code=422, detail="Raqam kerak")
     store_id = payload.get("store_id")
     if user["role"] == "seller":
-        store_id = user.get("store_id") or bot.main_store_id()
+        store_id = require_seller_store(user)
     if store_id is None:
         branch = bot.branch_store()
         store_id = branch["id"] if branch else bot.main_store_id()
@@ -800,6 +910,16 @@ async def api_branch_sell(request: Request):
     if status != "ok":
         raise HTTPException(status_code=409, detail=f"Sotuv amalga oshmadi: {status}")
     refreshed = bot.get_item_by_number(int(store_id), number)
+    if user["role"] == "seller":
+        item_data = dict(refreshed or item)
+        return {
+            "ok": True,
+            "item": {
+                key: item_data[key]
+                for key in ("number", "product_name", "status")
+                if key in item_data
+            },
+        }
     return {"ok": True, "item": dict(refreshed or item), "sale": sale}
 
 
@@ -816,13 +936,17 @@ async def api_branch_restock(request: Request):
     product = bot.inventory_get(int(inventory_id))
     if not product:
         raise HTTPException(status_code=404, detail="Mahsulot topilmadi")
-    if user["role"] == "seller" and product.get("store_id") != (user.get("store_id") or bot.main_store_id()):
+    if user["role"] == "seller" and product["store_id"] != require_seller_store(user):
         raise HTTPException(status_code=403, detail="Bu sizning do'koningiz emas")
     try:
         updated = bot.branch_restock(int(inventory_id), numbers, user_id=user.get("id"))
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
-    return product_dict(updated)
+    return (
+        seller_product_dict(updated)
+        if user["role"] == "seller"
+        else product_dict(updated)
+    )
 
 
 @app.get("/api/users")

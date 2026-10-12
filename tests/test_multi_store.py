@@ -190,7 +190,14 @@ class BotAuthFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(bot.current_user(stranger))
 
     async def test_login_flow_links_telegram(self):
-        bot.create_user("sotuvchi9", "parol123", "Test Sotuvchi", "seller")
+        branch = bot.branch_store()
+        bot.create_user(
+            "sotuvchi9",
+            "parol123",
+            "Test Sotuvchi",
+            "seller",
+            branch["id"],
+        )
         context = SimpleNamespace(user_data={"auth_step": "login"})
         upd = self._update(222, "sotuvchi9")
         await bot.auth_or_seller_text(upd, context)
@@ -200,11 +207,163 @@ class BotAuthFlowTests(unittest.IsolatedAsyncioTestCase):
         linked = bot.get_user_by_telegram(222)
         self.assertIsNotNone(linked)
         self.assertEqual(linked["login"], "sotuvchi9")
+        seller_keyboard = upd2.message.reply_text.await_args.kwargs["reply_markup"].keyboard
+        seller_buttons = [button.text for row in seller_keyboard for button in row]
+        self.assertIn("📦 Ombor", seller_buttons)
+        self.assertIn("🔢 Raqam bilan sotish", seller_buttons)
+        self.assertNotIn("👥 Foydalanuvchilar", seller_buttons)
+        self.assertIn(branch["name"], upd2.message.reply_text.await_args.args[0])
+
+        bot.inventory_create(
+            "SellerOmborGilam",
+            "dona",
+            1,
+            100_000,
+            150_000,
+            store_id=branch["id"],
+            item_numbers=["SELLER-001"],
+        )
+        warehouse_update = self._update(222, "📦 Ombor")
+        await bot.auth_or_seller_text(warehouse_update, context)
+        warehouse_message = warehouse_update.effective_message.reply_text
+        self.assertIn(
+            "SellerOmborGilam",
+            warehouse_message.await_args.args[0],
+        )
+
         # Wrong password does not link another telegram account
         context2 = SimpleNamespace(user_data={"auth_step": "login"})
         await bot.auth_or_seller_text(self._update(333, "sotuvchi9"), context2)
         await bot.auth_or_seller_text(self._update(333, "xato"), context2)
         self.assertIsNone(bot.get_user_by_telegram(333))
+
+    async def test_seller_menu_cancels_stale_item_number_mode(self):
+        branch = bot.branch_store()
+        seller = bot.create_user(
+            "menu-seller",
+            "parol123",
+            "Menyu Sotuvchi",
+            "seller",
+            branch["id"],
+        )
+        bot.link_user_telegram(seller["id"], 445)
+        bot.inventory_create(
+            "Menu Carpet",
+            "dona",
+            1,
+            100_000,
+            150_000,
+            store_id=branch["id"],
+            item_numbers=["001"],
+        )
+        context = SimpleNamespace(user_data={"awaiting_item_number": True})
+        update = self._update(445, "📦 Ombor")
+
+        await bot.auth_or_seller_text(update, context)
+
+        response = update.effective_message.reply_text.await_args.args[0]
+        self.assertIn(branch["name"], response)
+        self.assertIn("Menu Carpet", response)
+        self.assertNotIn("awaiting_item_number", context.user_data)
+
+    async def test_seller_restock_selects_product_before_plain_numbers(self):
+        branch = bot.branch_store()
+        seller = bot.create_user(
+            "restock-seller",
+            "parol123",
+            "Raqam Sotuvchi",
+            "seller",
+            branch["id"],
+        )
+        bot.link_user_telegram(seller["id"], 446)
+        product = bot.inventory_create(
+            "Restock Carpet",
+            "dona",
+            1,
+            100_000,
+            150_000,
+            store_id=branch["id"],
+            item_numbers=["009"],
+        )
+        context = SimpleNamespace(user_data={})
+        menu_update = self._update(446, "➕ Raqam qo‘shish")
+        await bot.auth_or_seller_text(menu_update, context)
+        buttons = menu_update.message.reply_text.await_args.kwargs["reply_markup"].inline_keyboard
+        self.assertEqual(
+            buttons[0][0].callback_data,
+            f"sellerrestock:{product['id']}",
+        )
+
+        query = SimpleNamespace(
+            data=f"sellerrestock:{product['id']}",
+            answer=AsyncMock(),
+            edit_message_text=AsyncMock(),
+        )
+        callback_update = SimpleNamespace(
+            effective_user=SimpleNamespace(id=446),
+            callback_query=query,
+            effective_message=SimpleNamespace(reply_text=AsyncMock()),
+            message=SimpleNamespace(text="", reply_text=AsyncMock()),
+        )
+        await bot.seller_restock_callback(callback_update, context)
+        await bot.auth_or_seller_text(self._update(446, "010, 011"), context)
+
+        numbers = bot.list_items(branch["id"], status="in_stock")
+        self.assertEqual({item["number"] for item in numbers}, {"009", "010", "011"})
+
+    async def test_seller_add_prompts_for_missing_price_and_saves_to_own_store(self):
+        branch = bot.branch_store()
+        seller = bot.create_user(
+            "voice-seller",
+            "parol123",
+            "Ovoz Sotuvchi",
+            "seller",
+            branch["id"],
+        )
+        bot.link_user_telegram(seller["id"], 447)
+        message = SimpleNamespace(reply_text=AsyncMock())
+        update = SimpleNamespace(effective_message=message)
+        context = SimpleNamespace(user_data={})
+
+        await bot.stage_inventory_add(
+            update,
+            context,
+            {
+                "name": "VoiceCarpet",
+                "quantity": 2,
+                "unit": "dona",
+                "store_id": branch["id"],
+            },
+            "VoiceCarpet 2 dona",
+        )
+
+        self.assertTrue(context.user_data["entering_price_for_pending"])
+        self.assertIn("sotish narxini kiriting", message.reply_text.await_args.args[0])
+        await bot.auth_or_seller_text(self._update(447, "250000"), context)
+        self.assertEqual(
+            context.user_data["pending_inventory"]["sale_price"],
+            250_000,
+        )
+
+        query = SimpleNamespace(
+            data="inv:save",
+            answer=AsyncMock(),
+            edit_message_text=AsyncMock(),
+        )
+        callback_update = SimpleNamespace(
+            effective_user=SimpleNamespace(id=447),
+            callback_query=query,
+            effective_message=SimpleNamespace(reply_text=AsyncMock()),
+            message=SimpleNamespace(text="", reply_text=AsyncMock()),
+        )
+        await bot.inventory_callback(callback_update, context)
+
+        branch_products = bot.inventory_list(store_id=branch["id"])
+        self.assertEqual(len(branch_products), 1)
+        self.assertEqual(branch_products[0]["name"], "VoiceCarpet")
+        self.assertEqual(branch_products[0]["quantity"], 2)
+        main_products = bot.inventory_list(store_id=bot.main_store_id())
+        self.assertEqual(main_products, [])
 
     async def test_admin_branch_add_flow(self):
         branch = bot.branch_store()

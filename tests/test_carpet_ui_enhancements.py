@@ -419,7 +419,7 @@ class CarpetUIEnhancementsTests(unittest.IsolatedAsyncioTestCase):
             ["vact:add", "vact:sell", "vact:cancel"],
         )
 
-    async def test_actionless_voice_add_button_stages_inventory_add(self):
+    async def test_actionless_voice_add_prompts_for_missing_sale_price(self):
         bot.set_usd_rate(12_850)
         parsed = bot.parse_command(
             "Prado 3x4 5 dona kelish narxi kvadratiga 3 dollar"
@@ -448,17 +448,16 @@ class CarpetUIEnhancementsTests(unittest.IsolatedAsyncioTestCase):
         await bot.voice_action_callback(update, context)
 
         self.assertNotIn("actionless_voice_data", context.user_data)
+        self.assertTrue(context.user_data["entering_price_for_pending"])
         self.assertEqual(
-            bot.inventory_get_with_prices(
-                bot.inventory_get_by_key(
-                    bot.inventory_key_for("Prado 3x4")
-                )["id"]
-            )["purchase_price"],
+            context.user_data["pending_inventory"]["purchase_price"],
             462_600.0,
         )
+        self.assertIsNone(
+            bot.inventory_get_by_key(bot.inventory_key_for("Prado 3x4"))
+        )
         result = query.edit_message_text.await_args.args[0]
-        self.assertIn("Omborga saqlandi", result)
-        self.assertIn("Jami qoldiq: 5 dona", result)
+        self.assertIn("sotish narxini kiriting", result)
 
     async def test_voice_without_action_shows_action_buttons_instead_of_failing(self):
         voice_file = SimpleNamespace(

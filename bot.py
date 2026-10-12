@@ -1425,11 +1425,16 @@ def add_purchase(
     area_sqm: float | None = None,
     price_per_sqm_usd: float | None = None,
     purchase_price_usd: float | None = None,
+    store_id: int | None = None,
 ):
     now = shop_now()
     inventory_key = inventory_key_for(name)
     conn = db()
     try:
+        if store_id is None:
+            store_id = main_store_id(conn)
+        elif store_id != main_store_id(conn):
+            inventory_key = f"store{store_id}:{inventory_key}"
         usd_rate = get_usd_rate(conn)
         if not dimensions:
             dim_res = extract_dimensions_and_area(name)
@@ -1442,8 +1447,9 @@ def add_purchase(
             purchase_price_usd = round(purchase_price / usd_rate, 2)
 
         row = conn.execute(
-            "SELECT id, quantity, name, unit FROM inventory WHERE name_key=? AND archived_at IS NULL",
-            (inventory_key,),
+            "SELECT id, quantity, name, unit FROM inventory "
+            "WHERE name_key=? AND store_id=? AND archived_at IS NULL",
+            (inventory_key, store_id),
         ).fetchone()
         if row:
             inventory_id = int(row["id"])
@@ -1477,9 +1483,10 @@ def add_purchase(
                 """
                 INSERT INTO inventory(
                     article, name_key, name, unit, quantity, updated_at,
-                    dimensions, area_sqm, price_per_sqm_usd, purchase_price_usd
+                    dimensions, area_sqm, price_per_sqm_usd, purchase_price_usd,
+                    store_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id
                 """,
                 (
                     inventory_key,
@@ -1492,6 +1499,7 @@ def add_purchase(
                     area_sqm,
                     price_per_sqm_usd,
                     purchase_price_usd,
+                    store_id,
                 ),
             )
             inventory_id = int(cursor.fetchone()["id"])
@@ -1516,6 +1524,7 @@ def add_purchase(
             purchase_price_usd=purchase_price_usd,
             usd_rate=usd_rate,
             created_at=now,
+            store_id=store_id,
         )
         conn.commit()
         return new_quantity
@@ -1687,8 +1696,14 @@ def build_application():
     app.add_handler(CommandHandler("id", show_telegram_id, filters=admin_filter))
     app.add_handler(
         CallbackQueryHandler(
-            admin_callback(inventory_callback),
+            user_callback(inventory_callback),
             pattern=r"^inv:",
+        )
+    )
+    app.add_handler(
+        CallbackQueryHandler(
+            user_callback(seller_restock_callback),
+            pattern=r"^sellerrestock:",
         )
     )
     app.add_handler(
@@ -1711,7 +1726,7 @@ def build_application():
     )
     app.add_handler(
         CallbackQueryHandler(
-            admin_callback(voice_action_callback),
+            user_callback(voice_action_callback),
             pattern=r"^vact:",
         )
     )
@@ -1751,7 +1766,7 @@ def build_application():
             pattern=r"^debt:",
         )
     )
-    app.add_handler(MessageHandler(filters.VOICE & admin_filter, handle_voice))
+    app.add_handler(MessageHandler(filters.VOICE, auth_or_seller_voice))
     app.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND & admin_filter,
@@ -1799,7 +1814,7 @@ def admin_callback(handler):
 def current_user(update):
     """The app user for this Telegram account: the bootstrap admin (via
     TELEGRAM_ADMIN_ID), a linked users-table account, or None."""
-    tg = update.effective_user if update else None
+    tg = getattr(update, "effective_user", None) if update else None
     if tg is None:
         return None
     if is_admin_user(tg):
@@ -1833,10 +1848,40 @@ def user_callback(handler):
     return guarded_callback
 
 
+async def seller_restock_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user = current_user(update)
+    store_id = seller_store_id(user)
+    if not user or user.get("role") != "seller" or store_id is None:
+        await query.edit_message_text("Sotuvchi do‘koni aniqlanmadi.")
+        return
+    try:
+        inventory_id = int((query.data or "").split(":")[1])
+    except (IndexError, ValueError):
+        await query.edit_message_text("Gilam tanlovi yaroqsiz. Qaytadan urinib ko‘ring.")
+        return
+    product = inventory_get(inventory_id)
+    if not product or product["store_id"] != store_id:
+        await query.edit_message_text("Bu gilam biriktirilgan do‘koningizda topilmadi.")
+        return
+    context.user_data["br_restock"] = {
+        "step": "numbers",
+        "inventory_id": inventory_id,
+        "name": product["name"],
+    }
+    await query.edit_message_text(
+        f"🏪 {get_store(store_id)['name']}\n"
+        f"🧶 Tanlandi: {product['name']}\n"
+        "Yangi yorliq raqamlarini vergul bilan yuboring.\n"
+        "Masalan: 010, 011"
+    )
+
+
 def seller_menu_markup():
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton("🏪 Mening do‘konim"), KeyboardButton("🔢 Raqam bilan sotish")],
+            [KeyboardButton("📦 Ombor"), KeyboardButton("🔢 Raqam bilan sotish")],
             [KeyboardButton("➕ Gilam qo‘shish"), KeyboardButton("➕ Raqam qo‘shish")],
             [KeyboardButton("📊 Bugungi savdom")],
         ],
@@ -1867,12 +1912,38 @@ def role_menu_markup(user):
     return seller_menu_markup()
 
 
+def seller_store_id(user):
+    if not user or user.get("role") != "seller":
+        return None
+    store_id = user.get("store_id")
+    return int(store_id) if store_id is not None else None
+
+
+def clear_seller_workflow(context: ContextTypes.DEFAULT_TYPE):
+    for key in (
+        "awaiting_item_number",
+        "br_add",
+        "br_restock",
+        "pending_inventory",
+        "entering_price_for_pending",
+        "adding_inventory",
+        "adding_bulk_inventory",
+        "wizard_step",
+        "wizard_data",
+    ):
+        context.user_data.pop(key, None)
+
+
 async def start_any(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    clear_seller_workflow(context)
     user = current_user(update)
     if user:
         name = user.get("display_name") or user.get("login") or ""
+        store_id = seller_store_id(user)
+        store = get_store(store_id) if store_id is not None else None
+        store_line = f"\n🏪 Do‘kon: {store['name']}" if store else ""
         await update.message.reply_text(
-            f"Xush kelibsiz, {name}! 👋",
+            f"Xush kelibsiz, {name}! 👋{store_line}",
             reply_markup=role_menu_markup(user),
         )
         return
@@ -1904,6 +1975,7 @@ def branch_overview_text(store_id: int) -> str:
     if not rows:
         lines.append("Hozircha gilam yo‘q.")
     for r in rows:
+        r = dict(r)
         line = f"• {r['name']} — {fmt_qty(r['quantity'])} {r['unit']}"
         if r.get("sale_price"):
             line += f" | Sotish: {fmt_money(r['sale_price'])} so'm"
@@ -1932,13 +2004,17 @@ async def branch_overview_message(update: Update, context: ContextTypes.DEFAULT_
 
 
 async def seller_today_sales_message(update: Update, context: ContextTypes.DEFAULT_TYPE, user):
-    store_id = user.get("store_id")
+    store_id = seller_store_id(user)
     if store_id is None:
-        branch = branch_store()
-        store_id = branch["id"] if branch else main_store_id()
+        await update.effective_message.reply_text(
+            "Do‘koningiz aniqlanmadi. Administratorga murojaat qiling."
+        )
+        return
     today = datetime.now(SHOP_TIMEZONE).date().isoformat()
     summary = store_day_sales(store_id, today, user.get("id"))
+    store = get_store(store_id)
     lines = [
+        f"🏪 Do‘kon: {store['name'] if store else '—'}",
         f"📊 Bugungi savdongiz ({today}):",
         f"Sotuvlar: {summary['sales_count']} ta",
         f"Tushum: {fmt_money(summary['revenue'])} so'm",
@@ -2070,9 +2146,11 @@ async def auth_or_seller_text(update: Update, context: ContextTypes.DEFAULT_TYPE
                 )
                 return
             link_user_telegram(account["id"], update.effective_user.id)
+            store = get_store(account["store_id"]) if account.get("store_id") else None
+            store_label = f"\nDo‘kon: {store['name']}" if store else ""
             await update.message.reply_text(
-                f"✅ Kirdingiz: {account.get('display_name') or account['login']} "
-                f"({account['role']})",
+                f"✅ Profilga kirdingiz: {account.get('display_name') or account['login']} "
+                f"({account['role']}){store_label}",
                 reply_markup=role_menu_markup(account),
             )
             return
@@ -2088,11 +2166,100 @@ async def auth_or_seller_text(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     # Seller router
+    store_id = seller_store_id(user)
+    if store_id is None:
+        await update.message.reply_text(
+            "❌ Hisobingizga do‘kon biriktirilmagan. Administratorga murojaat qiling.",
+            reply_markup=seller_menu_markup(),
+        )
+        return
+
+    menu_actions = {
+        "➕ Gilam qo‘shish",
+        "➕ Gilam qo'shish",
+        "➕ Raqam qo‘shish",
+        "➕ Raqam qo'shish",
+        "📦 Ombor",
+        "🏪 Mening do‘konim",
+        "🔢 Raqam bilan sotish",
+        "📊 Bugungi savdom",
+    }
+    if text in menu_actions:
+        clear_seller_workflow(context)
+        store = get_store(store_id)
+        if text in {"➕ Gilam qo‘shish", "➕ Gilam qo'shish"}:
+            context.user_data["br_add"] = {
+                "step": "name",
+                "store_id": store_id,
+                "admin": False,
+            }
+            await update.message.reply_text(
+                f"🏪 Do‘kon: {store['name'] if store else '—'}\n"
+                "Yangi gilam nomini o‘lchami bilan yozing (masalan: Sag 3x4):"
+            )
+            return
+        if text in {"➕ Raqam qo‘shish", "➕ Raqam qo'shish"}:
+            products = inventory_list(limit=500, store_id=store_id)
+            if not products:
+                await update.message.reply_text(
+                    "Bu do‘kon omborida raqam biriktirish uchun gilam yo‘q.",
+                    reply_markup=seller_menu_markup(),
+                )
+                return
+            buttons = [
+                [InlineKeyboardButton(row["name"], callback_data=f"sellerrestock:{row['id']}")]
+                for row in products
+            ]
+            await update.message.reply_text(
+                f"🏪 {store['name'] if store else 'Do‘kon'}\n"
+                "Avval ombordagi gilamni tanlang:",
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+            return
+        if text in {"📦 Ombor", "🏪 Mening do‘konim"}:
+            await branch_overview_message(update, context, store_id)
+            return
+        if text == "🔢 Raqam bilan sotish":
+            context.user_data["awaiting_item_number"] = True
+            await update.message.reply_text(
+                "Sotiladigan gilamning yorliq raqamini yozing (masalan: 001):",
+                reply_markup=seller_menu_markup(),
+            )
+            return
+        if text == "📊 Bugungi savdom":
+            await seller_today_sales_message(update, context, user)
+            return
+
+    if context.user_data.get("entering_price_for_pending"):
+        pending = context.user_data.get("pending_inventory")
+        if not pending:
+            clear_user_temporary_state(context)
+            await update.message.reply_text("Ma'lumot topilmadi. Qaytadan boshlang.")
+            return
+        prices = parse_pending_inventory_prices(text)
+        if prices is None:
+            await update.message.reply_text(
+                "❌ Narxni aniqlay olmadim. Masalan: 200000 yoki 150000 200000."
+            )
+            return
+        pending.update(prices)
+        if pending.get("sale_price") is None:
+            await update.message.reply_text(
+                "Sotish narxi ham kerak. Uni so‘m yoki dollarda yuboring (masalan: 250000):"
+            )
+            return
+        context.user_data.pop("entering_price_for_pending", None)
+        preview, keyboard = pending_preview(pending)
+        await update.message.reply_text(
+            f"✅ Narx saqlandi!\n\n{preview}", reply_markup=keyboard
+        )
+        return
+
+    if context.user_data.get("br_add"):
+        await process_br_add_step(update, context)
+        return
+
     if context.user_data.pop("awaiting_item_number", False):
-        store_id = user.get("store_id")
-        if store_id is None:
-            branch = branch_store()
-            store_id = branch["id"] if branch else main_store_id()
         item, status, sale = sell_branch_item(store_id, text, user_id=user.get("id"))
         if status == "not_found":
             await update.message.reply_text(
@@ -2107,23 +2274,15 @@ async def auth_or_seller_text(update: Update, context: ContextTypes.DEFAULT_TYPE
             await update.message.reply_text("❌ Sotuv amalga oshmadi. Ombordagi qoldiqni tekshiring.")
             return
         product = inventory_get(int(item["inventory_id"]))
+        store = get_store(store_id)
         await update.message.reply_text(
-            format_sale_success_message(
+            f"🏪 Do‘kon: {store['name'] if store else '—'}\n\n"
+            + format_sale_success_message(
                 item["product_name"], 1, item["product_unit"],
                 float(product["quantity"]) if product else 0, sale,
             ),
             reply_markup=seller_menu_markup(),
         )
-        return
-
-    store_id = user.get("store_id")
-    if store_id is None:
-        branch = branch_store()
-        store_id = branch["id"] if branch else main_store_id()
-
-    # Seller: add a new numbered carpet (branch kirim) — shared wizard
-    if context.user_data.get("br_add"):
-        await process_br_add_step(update, context)
         return
 
     # Seller: add label numbers to an existing product (restock)
@@ -2132,21 +2291,6 @@ async def auth_or_seller_text(update: Update, context: ContextTypes.DEFAULT_TYPE
         if text.lower() in {"bekor", "cancel", "❌"}:
             context.user_data.pop("br_restock", None)
             await update.message.reply_text("Bekor qilindi.", reply_markup=seller_menu_markup())
-            return
-        if br_restock.get("step") == "name":
-            matched, status = inventory_find_by_name(text, store_id=store_id)
-            if status != "ok":
-                await update.message.reply_text(
-                    "❌ Bu do'konda bunday gilam topilmadi. Nomini tekshirib qayta yozing:"
-                )
-                return
-            br_restock["inventory_id"] = int(matched["id"])
-            br_restock["name"] = matched["name"]
-            br_restock["step"] = "numbers"
-            context.user_data["br_restock"] = br_restock
-            await update.message.reply_text(
-                f"«{matched['name']}» — yangi yorliq raqamlarini yozing (vergul bilan):"
-            )
             return
         if br_restock.get("step") == "numbers":
             numbers = [n for n in re.split(r"[,\n;]+", text) if n.strip()]
@@ -2165,29 +2309,6 @@ async def auth_or_seller_text(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             return
 
-    if text == "➕ Gilam qo‘shish":
-        context.user_data["br_add"] = {"step": "name", "store_id": store_id, "admin": False}
-        await update.message.reply_text(
-            "Yangi gilam nomini o'lchami bilan yozing (masalan: Sag 3x4):"
-        )
-        return
-    if text == "➕ Raqam qo‘shish":
-        context.user_data["br_restock"] = {"step": "name"}
-        await update.message.reply_text("Qaysi gilamga raqam qo'shiladi? Nomini yozing:")
-        return
-
-    if text == "🏪 Mening do‘konim":
-        await branch_overview_message(update, context, store_id)
-        return
-    if text == "🔢 Raqam bilan sotish":
-        context.user_data["awaiting_item_number"] = True
-        await update.message.reply_text(
-            "Sotiladigan gilamning yorliq raqamini yozing (masalan: QG-001):"
-        )
-        return
-    if text == "📊 Bugungi savdom":
-        await seller_today_sales_message(update, context, user)
-        return
     await update.message.reply_text(
         "Menyudan tanlang:", reply_markup=seller_menu_markup()
     )
@@ -2624,6 +2745,7 @@ def inventory_add(
     area_sqm: float | None = None,
     price_per_sqm_usd: float | None = None,
     purchase_price_usd: float | None = None,
+    store_id: int | None = None,
 ):
     return add_purchase(
         name,
@@ -2635,6 +2757,7 @@ def inventory_add(
         area_sqm=area_sqm,
         price_per_sqm_usd=price_per_sqm_usd,
         purchase_price_usd=purchase_price_usd,
+        store_id=store_id,
     )
 
 
@@ -5244,8 +5367,21 @@ async def stage_inventory_add(
         )
         return
 
-    inventory_key = inventory_key_for(parsed["name"])
-    existing = inventory_get_by_key(inventory_key)
+    store_id = parsed.get("store_id")
+    existing, match_status = inventory_find_by_name(
+        parsed["name"],
+        store_id=store_id,
+    )
+    if match_status == "ambiguous":
+        await update.effective_message.reply_text(
+            "❌ Bu do‘konda gilam nomi bir nechta yozuvga mos keldi. "
+            "Aniq nomini yuboring."
+        )
+        return
+    if match_status == "not_found":
+        existing = None
+    elif existing:
+        existing = inventory_get_with_prices(int(existing["id"]))
     requested_unit = explicit_inventory_unit(source_text)
     if existing and requested_unit is None:
         parsed["unit"] = existing["unit"]
@@ -5256,17 +5392,22 @@ async def stage_inventory_add(
             "Birlikni o‘zgartirish uchun ombor tahriridan foydalaning."
         )
         return
-    context.user_data["pending_inventory"] = {
+    pending = {
         "name": parsed["name"],
         "quantity": parsed["quantity"],
         "unit": parsed["unit"],
-        "purchase_price": parsed.get("purchase_price"),
-        "sale_price": parsed.get("sale_price"),
+        "purchase_price": parsed.get("purchase_price")
+        if parsed.get("purchase_price") is not None
+        else (existing.get("purchase_price") if existing else None),
+        "sale_price": parsed.get("sale_price")
+        if parsed.get("sale_price") is not None
+        else (existing.get("sale_price") if existing else None),
         "dimensions": parsed.get("dimensions"),
         "area_sqm": parsed.get("area_sqm"),
         "price_per_sqm_usd": parsed.get("price_per_sqm_usd"),
         "purchase_price_usd": parsed.get("purchase_price_usd"),
         "source_text": source_text,
+        "store_id": store_id,
         "exclude_id": existing["id"] if existing else None,
         "existing": (
             {"quantity": existing["quantity"], "unit": existing["unit"]}
@@ -5274,7 +5415,24 @@ async def stage_inventory_add(
             else None
         ),
     }
+    context.user_data["pending_inventory"] = pending
     clear_user_temporary_state(context)
+    if pending.get("sale_price") is None:
+        store = get_store(store_id) if store_id is not None else None
+        context.user_data["entering_price_for_pending"] = True
+        prompt = (
+            f"🏪 Do‘kon: {store['name'] if store else 'Asosiy do‘kon'}\n"
+            f"🧶 “{inventory_display_name(pending['name'], pending.get('dimensions'))}” "
+            f"({fmt_qty(pending['quantity'])} {pending['unit']}) uchun sotish narxini kiriting.\n"
+            "So‘m yoki dollarda yuboring (masalan: 250000 yoki 20$). "
+            "Kelish va sotish narxini birga ham yuborishingiz mumkin."
+        )
+        callback_query = getattr(update, "callback_query", None)
+        if callback_query:
+            await callback_query.edit_message_text(prompt)
+        else:
+            await update.effective_message.reply_text(prompt)
+        return
     await show_pending(update, context)
 
 
@@ -5940,6 +6098,7 @@ async def inventory_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             area_sqm=pending.get("area_sqm"),
             price_per_sqm_usd=pending.get("price_per_sqm_usd"),
             purchase_price_usd=pending.get("purchase_price_usd"),
+            store_id=pending.get("store_id"),
         )
         label = inventory_display_name(pending["name"], pending.get("dimensions"))
         clear_user_temporary_state(context)
@@ -5968,8 +6127,27 @@ async def inventory_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
 
+async def auth_or_seller_voice(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    user = current_user(update)
+    if user is None:
+        await update.effective_message.reply_text(
+            "Avval /start bosing va login/parol orqali kiring."
+        )
+        return
+    if user.get("role") == "seller" and seller_store_id(user) is None:
+        await update.effective_message.reply_text(
+            "Hisobingizga do‘kon biriktirilmagan. Administratorga murojaat qiling."
+        )
+        return
+    await handle_voice(update, context)
+
+
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
+    user = current_user(update)
     context.user_data.pop("actionless_voice_data", None)
 
     await message.reply_text(
@@ -6041,6 +6219,19 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Using deterministic parser after Gemini structured parsing failed"
             )
             parsed = parse_command(text)
+        if user and user.get("role") == "seller":
+            store_id = seller_store_id(user)
+            if store_id is None:
+                await message.reply_text(
+                    "❌ Hisobingizga do‘kon biriktirilmagan. Administratorga murojaat qiling."
+                )
+                return
+            if parsed.get("action") == "subtract":
+                await message.reply_text(
+                    "Sotuvni yorliq raqami orqali kiriting: 🔢 Raqam bilan sotish."
+                )
+                return
+            parsed["store_id"] = store_id
             used_ai_parser = False
         else:
             used_ai_parser = True
@@ -6354,6 +6545,13 @@ async def voice_action_callback(
     if action not in {"add", "sell"}:
         await query.edit_message_text("❌ Noma'lum amal.")
         return
+    user = current_user(update)
+    if user and user.get("role") == "seller" and action == "sell":
+        context.user_data.pop("actionless_voice_data", None)
+        await query.edit_message_text(
+            "Sotuvni yorliq raqami orqali kiriting: 🔢 Raqam bilan sotish."
+        )
+        return
     if not data.get("quantity_is_explicit") or data.get("quantity") is None:
         await query.edit_message_text(
             "❌ Miqdor aniq emas. Ovozni miqdori bilan qayta yuboring."
@@ -6373,66 +6571,10 @@ async def voice_action_callback(
                 "❌ Gilam nomi aniqlanmadi. Ovozni nomi bilan qayta yuboring."
             )
             return
-        try:
-            new_stock = inventory_add(
-                parsed["name"],
-                unit,
-                quantity,
-                purchase_price=parsed.get("purchase_price"),
-                sale_price=parsed.get("sale_price"),
-                dimensions=parsed.get("dimensions"),
-                area_sqm=parsed.get("area_sqm"),
-                price_per_sqm_usd=parsed.get("price_per_sqm_usd"),
-                purchase_price_usd=parsed.get("purchase_price_usd"),
-            )
-        except InventoryUnitMismatchError as error:
-            await query.edit_message_text(f"❌ {error}")
-            return
-
-        product_row = inventory_get_by_key(inventory_key_for(parsed["name"]))
-        product = (
-            inventory_get_with_prices(product_row["id"])
-            if product_row
-            else None
-        )
-        label = inventory_display_name(
-            parsed["name"],
-            parsed.get("dimensions"),
-        )
-        result = (
-            "✅ Omborga saqlandi!\n\n"
-            f"🧶 Nomi: {label}\n"
-        )
-        if parsed.get("dimensions"):
-            result += (
-                f"📐 O‘lchami: {parsed['dimensions']} "
-                f"({fmt_qty(parsed.get('area_sqm'))} m²)\n"
-            )
-        result += (
-            f"➕ Qo‘shildi: {fmt_qty(quantity)} {unit}\n"
-            f"📊 Jami qoldiq: {fmt_qty(new_stock)} {unit}"
-        )
-        if parsed.get("price_per_sqm_usd") is not None:
-            result += (
-                f"\n📏 Kvadrat narxi: "
-                f"{fmt_usd(parsed['price_per_sqm_usd'])}/m²"
-            )
-        if parsed.get("purchase_price_usd") is not None:
-            result += (
-                f"\n💵 Kelish narxi: {fmt_usd(parsed['purchase_price_usd'])} "
-                f"({fmt_money(parsed.get('purchase_price'))} so‘m)"
-            )
-        elif parsed.get("purchase_price") is not None:
-            result += (
-                f"\n💵 Kelish narxi: "
-                f"{fmt_money(parsed['purchase_price'])} so‘m"
-            )
-        if product and product.get("sale_price") is not None:
-            result += (
-                f"\n🏷 Sotish narxi: "
-                f"{fmt_money(product['sale_price'])} so‘m"
-            )
-        await query.edit_message_text(result)
+        parsed.update({"quantity": quantity, "unit": unit})
+        if user and user.get("role") == "seller":
+            parsed["store_id"] = seller_store_id(user)
+        await stage_inventory_add(update, context, parsed, source_text)
         return
 
     matched, match_status = inventory_find_by_name(name)

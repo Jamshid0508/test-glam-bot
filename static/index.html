@@ -258,6 +258,15 @@
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; }
     }
+    .seller-view #rate-badge,
+    .seller-view #global-store,
+    .seller-view .period,
+    .seller-view [data-tab]:not([data-tab="branch"]),
+    .seller-view #overview,
+    .seller-view #products,
+    .seller-view #sales,
+    .seller-view #settlements,
+    .seller-view #users { display: none !important; }
   </style>
 </head>
 <body>
@@ -282,7 +291,7 @@
         <button class="tab active" data-tab="overview">📊 Umumiy</button>
         <button class="tab" data-tab="products">🧶 Ombor</button>
         <button class="tab" data-tab="sales">🧾 Sotuvlar</button>
-        <button class="tab" data-tab="branch">🏪 Filial</button>
+        <button class="tab" data-tab="branch">🏪 Do‘konim</button>
         <button class="tab admin-only" data-tab="settlements">💰 Hisob-kitob</button>
         <button class="tab admin-only" data-tab="users">👥 Foydalanuvchilar</button>
       </nav>
@@ -353,8 +362,12 @@
       </div>
     </section>
     <section id="branch" class="hidden">
+      <section id="seller-today-summary" class="panel hidden">
+        <div class="panel-head"><div><span class="eyebrow">BUGUN</span><h2>Bugungi savdom</h2></div></div>
+        <p><strong id="seller-today-count">0 ta</strong> · <strong id="seller-today-revenue">0 so‘m</strong></p>
+      </section>
       <div class="panel">
-        <div class="panel-head"><div><span class="eyebrow">FILIAL</span><h2 id="branch-title">Qamashi Glam</h2><p class="muted">Har bir gilam yorliq raqami bilan yuritiladi <span id="branch-address"></span></p></div></div>
+        <div class="panel-head">        <div><span class="eyebrow">DO‘KON</span><h2 id="branch-title">Qamashi Glam</h2><p class="muted">Har bir gilam yorliq raqami bilan yuritiladi <span id="branch-address"></span></p></div></div>
         <form id="branch-sell-form" class="form-grid" style="margin-bottom:18px">
           <label class="field">Sotish: yorliq raqami<input id="branch-sell-number" placeholder="Masalan: QG-001" required></label>
           <div class="field"><label>&nbsp;</label><button class="button primary" type="submit">🛒 Sotish</button></div>
@@ -367,7 +380,7 @@
         <h3 style="margin:18px 0 8px;font-size:14px">Mavjud gilamga raqam qo‘shish (kirim)</h3>
         <form id="branch-restock-form" class="form-grid">
           <label class="field">Gilam<select id="restock-product"></select></label>
-          <label class="field wide">Raqamlar (vergul yoki yangi qator bilan)<textarea id="restock-numbers" rows="2" placeholder="QG-010, QG-011"></textarea></label>
+          <label class="field wide">Raqamlar (vergul yoki yangi qator bilan)<textarea id="restock-numbers" rows="2" placeholder="010, 011"></textarea></label>
           <div class="field"><label>&nbsp;</label><button class="button" type="submit">➕ Qo‘shish</button></div>
         </form>
       </div>
@@ -711,8 +724,7 @@
       async function reload() {
         const storeParam = state.globalStore ? `&store_id=${state.globalStore}` : "";
         if (state.me && state.me.role === "seller") {
-          state.products = await api(`/api/products?archived=${$("#show-archived").checked}${state.storeId ? `&store_id=${state.storeId}` : ""}`);
-          renderProducts();
+          await loadBranch();
           return;
         }
         const [summary, products, sales] = await Promise.all([
@@ -1088,22 +1100,32 @@
         state.stores = await api("/api/stores");
         const main = state.stores.find((s) => s.kind === "main") || state.stores[0];
         const branch = state.stores.find((s) => s.kind === "branch");
-        state.branchId = branch ? branch.id : null;
+        const sellerStore = state.me && state.me.role === "seller"
+          ? state.stores.find((store) => store.id === state.me.store_id)
+          : null;
+        state.branchId = sellerStore ? sellerStore.id : (branch ? branch.id : null);
         if (state.storeId === null && main) state.storeId = main.id;
         if (state.me && state.me.role === "seller" && state.me.store_id) state.storeId = state.me.store_id;
         $("#store-filter").innerHTML = state.stores.map((s) => `<option value="${s.id}" ${s.id === state.storeId ? "selected" : ""}>${safe(s.name)}</option>`).join("");
         $("#global-store").innerHTML = '<option value="">🏬 Hammasi</option>' + state.stores.map((s) => `<option value="${s.id}" ${String(s.id) === String(state.globalStore) ? "selected" : ""}>${safe(s.name)}</option>`).join("");
-        if (branch && branch.address) $("#branch-address").textContent = `· 📍 ${branch.address}`;
+        const displayedStore = sellerStore || branch;
+        if (displayedStore && displayedStore.address) $("#branch-address").textContent = `· 📍 ${displayedStore.address}`;
         $("#user-store").innerHTML = state.stores.map((s) => `<option value="${s.id}">${safe(s.name)}</option>`).join("");
-        if (branch) $("#branch-title").textContent = branch.name;
+        if (displayedStore) $("#branch-title").textContent = displayedStore.name;
       }
       async function loadBranch() {
-        if (!state.branchId) { notify("Filial topilmadi."); return; }
-        const [items, products] = await Promise.all([
+        if (!state.branchId) { notify("Sizga do‘kon biriktirilmagan."); return; }
+        const seller = state.me && state.me.role === "seller";
+        const [items, products, today] = await Promise.all([
           api(`/api/items?store_id=${state.branchId}`),
           api(`/api/products?store_id=${state.branchId}`),
+          seller ? api("/api/my/sales/today") : Promise.resolve(null),
         ]);
         state.items = items;
+        if (today) {
+          $("#seller-today-count").textContent = `${today.sales_count} ta`;
+          $("#seller-today-revenue").textContent = money(today.revenue);
+        }
         $("#items-empty").classList.toggle("hidden", items.length > 0);
         $("#items-body").innerHTML = items.map((item) => `
           <tr>
@@ -1160,12 +1182,12 @@
           </tr>`).join("");
       }
       function applyRoleVisibility() {
-        if (state.me && state.me.role === "seller") {
-          document.querySelectorAll(".admin-only").forEach((el) => el.classList.add("hidden"));
-          const overviewTab = document.querySelector('[data-tab="overview"]');
-          const salesTab = document.querySelector('[data-tab="sales"]');
-          if (overviewTab) overviewTab.classList.add("hidden");
-          if (salesTab) salesTab.classList.add("hidden");
+        const seller = Boolean(state.me && state.me.role === "seller");
+        document.body.classList.toggle("seller-view", seller);
+        $("#seller-today-summary").classList.toggle("hidden", !seller);
+        if (seller) {
+          const store = state.stores.find((item) => item.id === state.me.store_id);
+          $("#branch-title").textContent = store ? store.name : "Do‘kon aniqlanmadi";
         }
       }
       $("#branch-sell-form").addEventListener("submit", async (event) => {
@@ -1254,8 +1276,9 @@
           if (initialized) { await reload(); return; }
           initialized = true;
           if (state.me && state.me.role === "seller") {
-            $("#user").textContent = state.me.display_name || state.me.login;
-            await reload();
+            const store = state.stores.find((item) => item.id === state.me.store_id);
+            $("#user").textContent = `${state.me.display_name || state.me.login} · ${store ? store.name : "Do‘kon biriktirilmagan"}`;
+            document.querySelector('[data-tab="branch"]').click();
             return;
           }
           const initial = await api("/api/bootstrap");
