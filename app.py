@@ -353,7 +353,9 @@ def seller_product_dict(row):
         return None
     return {
         key: item.get(key)
-        for key in ("id", "name", "unit", "quantity", "archived_at")
+        for key in ("id", "name", "unit", "quantity", "archived_at",
+                    "dimensions", "area_sqm", "sale_price", "purchase_price",
+                    "price_per_sqm_usd", "purchase_price_usd")
     }
 
 

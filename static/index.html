@@ -379,7 +379,13 @@
         <div id="items-empty" class="empty hidden">Filialda raqamli gilam yo‘q.</div>
         <h3 style="margin:18px 0 8px;font-size:14px">Mavjud gilamga raqam qo‘shish (kirim)</h3>
         <form id="branch-restock-form" class="form-grid">
-          <label class="field">Gilam<select id="restock-product"></select></label>
+          <label class="field wide">Gilam tanlang<select id="restock-product" style="font-size:14px"></select></label>
+          <div id="restock-product-info" style="display:none;background:#f0f7f0;border:1px solid #c3d9c3;border-radius:10px;padding:12px 16px;margin-bottom:4px;flex-wrap:wrap;gap:8px 20px;font-size:13px;grid-column:1/-1">
+            <span><span style="color:#666">Nomi:</span> <strong id="rpi-name">—</strong></span>
+            <span><span style="color:#666">Oʼlčami:</span> <strong id="rpi-dim">—</strong></span>
+            <span><span style="color:#666">Sotish narxi:</span> <strong id="rpi-price">—</strong></span>
+            <span><span style="color:#666">Qoldigʻi:</span> <strong id="rpi-qty">—</strong></span>
+          </div>
           <label class="field wide">Raqamlar (vergul yoki yangi qator bilan)<textarea id="restock-numbers" rows="2" placeholder="010, 011"></textarea></label>
           <div class="field"><label>&nbsp;</label><button class="button" type="submit">➕ Qo‘shish</button></div>
         </form>
@@ -482,7 +488,7 @@
       const initData = tg ? tg.initData : "";
       const localHost = ["localhost", "127.0.0.1", "::1"].includes(location.hostname);
       const localTest = !initData && localHost;
-      const state = { products: [], sales: [], summary: null, start: "", end: "", usd_rate: 12850, stores: [], storeId: null, branchId: null, me: null, items: [], globalStore: "" };
+      const state = { products: [], sales: [], summary: null, start: "", end: "", usd_rate: 12850, stores: [], storeId: null, branchId: null, me: null, items: [], globalStore: "", branchProducts: [] };
       const $ = (selector) => document.querySelector(selector);
       const money = (value) => value == null ? "—" : `${new Intl.NumberFormat("uz-UZ", { maximumFractionDigits: 0 }).format(value)} so‘m`;
       const qty = (value) => new Intl.NumberFormat("uz-UZ", { maximumFractionDigits: 2 }).format(Number(value || 0));
@@ -1135,7 +1141,13 @@
             <td data-label="Qo‘shilgan">${safe(String(item.created_at || "").slice(0, 10))}</td>
             <td data-label="Sotilgan">${item.sold_at ? safe(String(item.sold_at).slice(0, 10)) : "—"}</td>
           </tr>`).join("");
-        $("#restock-product").innerHTML = products.map((pr) => `<option value="${pr.id}">${safe(pr.name)} (${qty(pr.quantity)} ${safe(pr.unit)})</option>`).join("");
+        state.branchProducts = products;
+        $("#restock-product").innerHTML = products.map((pr) => {
+          const dim = pr.dimensions ? ` · ${pr.dimensions}` : '';
+          const price = pr.sale_price ? ` · ${new Intl.NumberFormat('uz-UZ', {maximumFractionDigits:0}).format(pr.sale_price)} so'm` : '';
+          return `<option value="${pr.id}">${safe(pr.name)}${safe(dim)}${safe(price)} (${qty(pr.quantity)} ${safe(pr.unit)})</option>`;
+        }).join("");
+        updateRestockInfo();
       }
       async function loadUsers() {
         const users = await api("/api/users");
@@ -1201,6 +1213,17 @@
           notify(`Sotildi: ${result.item.product_name} (${result.item.number})`);
         } catch (error) { notify(error.message); }
       });
+      function updateRestockInfo() {
+        const pr = (state.branchProducts || []).find(p => String(p.id) === String($("#restock-product").value));
+        const infoEl = $("#restock-product-info");
+        if (!pr) { infoEl.style.display = "none"; return; }
+        infoEl.style.display = "flex";
+        $("#rpi-name").textContent = pr.name || "—";
+        $("#rpi-dim").textContent = pr.dimensions ? (pr.dimensions + (pr.area_sqm ? " (" + pr.area_sqm + " m²)" : "")) : "—";
+        $("#rpi-price").textContent = pr.sale_price ? new Intl.NumberFormat("uz-UZ", {maximumFractionDigits:0}).format(pr.sale_price) + " soʼm" : "—";
+        $("#rpi-qty").textContent = new Intl.NumberFormat("uz-UZ", {maximumFractionDigits:2}).format(Number(pr.quantity || 0)) + " " + (pr.unit || "");
+      }
+      $("#restock-product").addEventListener("change", updateRestockInfo);
       $("#branch-restock-form").addEventListener("submit", async (event) => {
         event.preventDefault();
         const numbers = $("#restock-numbers").value.split(/[\n,;]+/).map((n) => n.trim()).filter(Boolean);
