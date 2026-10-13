@@ -1737,6 +1737,12 @@ def build_application():
     )
     app.add_handler(
         CallbackQueryHandler(
+            user_callback(branch_sale_callback),
+            pattern=r"^brsale:",
+        )
+    )
+    app.add_handler(
+        CallbackQueryHandler(
             admin_callback(wizard_callback),
             pattern=r"^wiz:",
         )
@@ -1951,6 +1957,7 @@ def seller_store_id(user):
 def clear_seller_workflow(context: ContextTypes.DEFAULT_TYPE):
     for key in (
         "awaiting_item_number",
+        "pending_branch_sale",
         "br_add",
         "br_restock",
         "pending_inventory",
@@ -1961,6 +1968,90 @@ def clear_seller_workflow(context: ContextTypes.DEFAULT_TYPE):
         "wizard_data",
     ):
         context.user_data.pop(key, None)
+
+
+def branch_sale_confirm_text(
+    number: str,
+    product_name: str,
+    default_price: float | None,
+) -> tuple[str, object]:
+    """Tasdiqlash xabari + tugmalar: miqdor (1 dona) va narx ko'rinadi."""
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    lines = [
+        f"🔢 Raqam: {normalize_item_number(number)}",
+        f"🧶 Gilam: {product_name}",
+        "📦 Miqdor: 1 dona",
+    ]
+    if default_price is not None:
+        lines.append(f"💰 Narx: {fmt_money(default_price)} so'm")
+        lines.append("")
+        lines.append("Shu narxda sotilsinmi? Yoki boshqa narxni yozing:")
+        markup = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        f"✅ {fmt_money(default_price)} dan sotish",
+                        callback_data="brsale:confirm",
+                    )
+                ],
+                [InlineKeyboardButton("❌ Bekor qilish", callback_data="brsale:cancel")],
+            ]
+        )
+    else:
+        lines.append("")
+        lines.append("Bu gilamda sotish narxi belgilanmagan.")
+        lines.append("Qanchadan sotilganini yozing (masalan: 150000 yoki 12$):")
+        markup = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("❌ Bekor qilish", callback_data="brsale:cancel")]]
+        )
+    return "\n".join(lines), markup
+
+
+async def branch_sale_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user = current_user(update)
+    store_id = seller_store_id(user) if user else None
+    pending = context.user_data.get("pending_branch_sale")
+    action = (query.data or "").split(":")[1] if ":" in (query.data or "") else ""
+    if action == "cancel" or not pending:
+        context.user_data.pop("pending_branch_sale", None)
+        await query.edit_message_text("❌ Sotuv bekor qilindi.")
+        return
+    if store_id is None or int(pending.get("store_id") or 0) != int(store_id):
+        context.user_data.pop("pending_branch_sale", None)
+        await query.edit_message_text("❌ Do'kon mos kelmadi. Qaytadan urinib ko'ring.")
+        return
+    item, status, sale = sell_branch_item(
+        store_id,
+        pending["number"],
+        user_id=user.get("id") if user else None,
+    )
+    if status == "not_found":
+        context.user_data.pop("pending_branch_sale", None)
+        await query.edit_message_text("❌ Bu raqamli gilam topilmadi.")
+        return
+    if status == "already_sold":
+        context.user_data.pop("pending_branch_sale", None)
+        await query.edit_message_text(
+            f"⚠️ «{pending['number']}» raqamli gilam allaqachon sotilgan."
+        )
+        return
+    if status != "ok":
+        context.user_data.pop("pending_branch_sale", None)
+        await query.edit_message_text("❌ Sotuv amalga oshmadi. Ombordagi qoldiqni tekshiring.")
+        return
+    context.user_data.pop("pending_branch_sale", None)
+    product = inventory_get(int(item["inventory_id"]))
+    store = get_store(store_id)
+    await query.edit_message_text(
+        f"🏪 Do‘kon: {store['name'] if store else '—'}\n\n"
+        + format_sale_success_message(
+            item["product_name"], 1, item["product_unit"],
+            float(product["quantity"]) if product else 0, sale,
+        )
+    )
 
 
 async def start_any(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2296,19 +2387,81 @@ async def auth_or_seller_text(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     if context.user_data.pop("awaiting_item_number", False):
-        item, status, sale = sell_branch_item(store_id, text, user_id=user.get("id"))
-        if status == "not_found":
+        number = normalize_item_number(text)
+        item = get_item_by_number(store_id, text)
+        if not item:
             await update.message.reply_text(
                 f"❌ «{text}» raqamli gilam topilmadi. Raqamni tekshirib qayta yozing yoki menyudan tanlang."
             )
             context.user_data["awaiting_item_number"] = True
             return
-        if status == "already_sold":
+        if item["status"] != "in_stock":
             await update.message.reply_text(f"⚠️ «{text}» raqamli gilam allaqachon sotilgan.")
             return
+        priced = inventory_get_with_prices(int(item["inventory_id"]))
+        default_price = None
+        if priced:
+            try:
+                default_price = (
+                    float(priced["sale_price"])
+                    if priced.get("sale_price") is not None
+                    else None
+                )
+            except (TypeError, ValueError):
+                default_price = None
+        context.user_data["pending_branch_sale"] = {
+            "store_id": store_id,
+            "number": number,
+        }
+        confirm_text, markup = branch_sale_confirm_text(
+            number, item["product_name"], default_price
+        )
+        await update.message.reply_text(confirm_text, reply_markup=markup)
+        return
+
+    # Sotuvchi raqamni tasdiqlagach narx kiritishi (qancha + qanchadan)
+    pending_sale = context.user_data.get("pending_branch_sale")
+    if pending_sale:
+        if text.lower() in {"bekor", "bekor qilish", "cancel", "❌"}:
+            context.user_data.pop("pending_branch_sale", None)
+            await update.message.reply_text(
+                "❌ Sotuv bekor qilindi.", reply_markup=seller_menu_markup()
+            )
+            return
+        try:
+            som, usd = parse_simple_price(text)
+        except ValueError as exc:
+            await update.message.reply_text(
+                f"❌ {exc}. Narxni qayta yozing (masalan: 150000 yoki 12$):"
+            )
+            return
+        if som is None and usd is None:
+            await update.message.reply_text(
+                "Narxni yozing (masalan: 150000 yoki 12$). Bekor qilish uchun: bekor"
+            )
+            return
+        sale_price = round(usd * get_usd_rate(), 2) if usd is not None else som
+        item, status, sale = sell_branch_item(
+            store_id,
+            pending_sale["number"],
+            user_id=user.get("id"),
+            sale_price=sale_price,
+        )
+        if status == "not_found":
+            context.user_data.pop("pending_branch_sale", None)
+            await update.message.reply_text("❌ Bu raqamli gilam topilmadi.")
+            return
+        if status == "already_sold":
+            context.user_data.pop("pending_branch_sale", None)
+            await update.message.reply_text(
+                f"⚠️ «{pending_sale['number']}» raqamli gilam allaqachon sotilgan."
+            )
+            return
         if status != "ok":
+            context.user_data.pop("pending_branch_sale", None)
             await update.message.reply_text("❌ Sotuv amalga oshmadi. Ombordagi qoldiqni tekshiring.")
             return
+        context.user_data.pop("pending_branch_sale", None)
         product = inventory_get(int(item["inventory_id"]))
         store = get_store(store_id)
         await update.message.reply_text(

@@ -461,11 +461,32 @@ class BotAuthFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rows[0]["quantity"], 2)
         items = bot.list_items(branch["id"], status="in_stock")
         self.assertEqual([i["number"] for i in items], ["QG-101", "QG-102"])
-        # And the seller can sell one by number right away
+        # Raqam kiritilganda darhol sotilmaydi — miqdor/narx tasdiqlanadi
         await say("🔢 Raqam bilan sotish")
         await say("QG-101")
+        still = bot.get_item_by_number(branch["id"], "QG-101")
+        self.assertEqual(still["status"], "in_stock")
+        self.assertIn("pending_branch_sale", context.user_data)
+        confirm_text = context.user_data["pending_branch_sale"]["number"]
+        self.assertEqual(confirm_text, "QG-101")
+        # Tasdiqlash tugmasi bosilganda sotiladi
+        query = SimpleNamespace(
+            data="brsale:confirm",
+            answer=AsyncMock(),
+            edit_message_text=AsyncMock(),
+        )
+        await bot.branch_sale_callback(
+            SimpleNamespace(
+                effective_user=SimpleNamespace(id=444),
+                callback_query=query,
+                effective_message=SimpleNamespace(reply_text=AsyncMock()),
+                message=SimpleNamespace(text="", reply_text=AsyncMock()),
+            ),
+            context,
+        )
         after = bot.get_item_by_number(branch["id"], "QG-101")
         self.assertEqual(after["status"], "sold")
+        self.assertNotIn("pending_branch_sale", context.user_data)
 
 
 if __name__ == "__main__":
