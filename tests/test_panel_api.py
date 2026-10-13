@@ -149,12 +149,12 @@ class PanelApiTests(unittest.IsolatedAsyncioTestCase):
         products = await app.api_products(seller_request)
         self.assertEqual(len(products), 1)
         self.assertEqual(products[0]["name"], "SellerPrivatePrice")
-        self.assertEqual(
-            set(products[0]),
-            {"id", "name", "unit", "quantity", "archived_at"},
-        )
+        # Sotuvchi o'z do'koni narxlarini ko'radi (kelish/sotish tahrirlash uchun)
+        self.assertEqual(products[0]["sale_price"], 200_000)
+        self.assertEqual(products[0]["purchase_price"], 100_000)
         items = await app.api_items(seller_request)
         self.assertEqual({item["number"] for item in items}, {"PANEL-001", "PANEL-002"})
+        self.assertIn("inventory_id", items[0])
         self.assertNotIn("sale_price", items[0])
         self.assertNotIn("purchase_price", items[0])
 
@@ -206,10 +206,7 @@ class PanelApiTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(created["name"], "SellerLabeledProduct")
         self.assertEqual(created["quantity"], 1)
-        self.assertEqual(
-            set(created),
-            {"id", "name", "unit", "quantity", "archived_at"},
-        )
+        self.assertEqual(created["sale_price"], 210_000)
         self.assertEqual(
             bot.inventory_get(created["id"])["store_id"],
             branch["id"],

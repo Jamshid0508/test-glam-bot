@@ -376,9 +376,12 @@ def seller_product_dict(row):
     item = row_dict(row)
     if item is None:
         return None
+    # Sotuvchi o'z do'konida narxlarni ko'rishi va tahrirlashi kerak.
     return {
         key: item.get(key)
-        for key in ("id", "name", "unit", "quantity", "archived_at")
+        for key in ("id", "name", "unit", "quantity", "archived_at",
+                    "dimensions", "area_sqm", "sale_price", "purchase_price",
+                    "price_per_sqm_usd", "purchase_price_usd", "store_id")
     }
 
 
@@ -621,7 +624,9 @@ async def api_create_product(request: Request):
             ) from error
         raise
     return (
-        seller_product_dict(product)
+        seller_product_dict(
+            {**dict(product), **dict(bot.current_product_prices(int(product["id"])))}
+        )
         if user["role"] == "seller"
         else product_dict(product)
     )
@@ -629,16 +634,81 @@ async def api_create_product(request: Request):
 
 @app.patch("/api/products/{product_id}")
 async def api_edit_product(product_id: int, request: Request):
-    require_admin(request)
+    user = require_panel_user(request)
     payload = await json_payload(request)
-    name = str(payload.get("name", "")).strip()
-    unit = str(payload.get("unit", "dona")).strip().lower()
-    if not name or unit not in {"dona", "metr"}:
-        raise HTTPException(status_code=422, detail="Name and valid unit are required")
     current = bot.inventory_get(product_id)
     if not current:
         raise HTTPException(status_code=404, detail="Product not found")
     current = dict(current)
+    if user["role"] == "seller":
+        own = require_seller_store(user)
+        if int(current.get("store_id") or 0) != int(own):
+            raise HTTPException(status_code=403, detail="Bu sizning do'koningiz emas")
+        # Sotuvchi: nom, o'lcham va narxlarni tahrirlashi mumkin.
+        # Miqdor raqamlar orqali, birlik esa o'zgarmaydi.
+        name = str(payload.get("name", current.get("name") or "")).strip()
+        if not name:
+            raise HTTPException(status_code=422, detail="Name and valid unit are required")
+        unit = current.get("unit") or "dona"
+        existing_prices = dict(bot.current_product_prices(product_id))
+        quantity = current.get("quantity")
+        purchase_price = as_number(
+            payload.get("purchase_price", existing_prices.get("purchase_price")),
+            "purchase_price",
+            nullable=True,
+        )
+        sale_price = as_number(
+            payload.get("sale_price", existing_prices.get("sale_price")),
+            "sale_price",
+            nullable=True,
+        )
+        dimensions = (
+            str(payload["dimensions"]).strip()
+            if "dimensions" in payload and payload["dimensions"] is not None
+            else current.get("dimensions")
+        )
+        area_sqm = as_number(
+            payload.get("area_sqm", current.get("area_sqm")),
+            "area_sqm",
+            nullable=True,
+        )
+        price_per_sqm_usd = as_number(
+            payload.get("price_per_sqm_usd", existing_prices.get("price_per_sqm_usd")),
+            "price_per_sqm_usd",
+            nullable=True,
+        )
+        purchase_price_usd = as_number(
+            payload.get("purchase_price_usd", existing_prices.get("purchase_price_usd")),
+            "purchase_price_usd",
+            nullable=True,
+        )
+        try:
+            product, status = bot.inventory_edit(
+                product_id,
+                name,
+                unit,
+                quantity,
+                purchase_price,
+                sale_price,
+                dimensions=dimensions,
+                area_sqm=area_sqm,
+                price_per_sqm_usd=price_per_sqm_usd,
+                purchase_price_usd=purchase_price_usd,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        if status == "name_exists":
+            raise HTTPException(
+                status_code=409,
+                detail="Bazada shu nomli boshqa gilam bor. Boshqa nom tanlang.",
+            )
+        if status == "not_found":
+            raise HTTPException(status_code=404, detail="Product not found")
+        return seller_product_dict(product)
+    name = str(payload.get("name", "")).strip()
+    unit = str(payload.get("unit", "dona")).strip().lower()
+    if not name or unit not in {"dona", "metr"}:
+        raise HTTPException(status_code=422, detail="Name and valid unit are required")
     existing_prices = dict(bot.current_product_prices(product_id))
     quantity = as_number(payload.get("quantity", current["quantity"]), "quantity")
     purchase_price = as_number(
@@ -900,6 +970,7 @@ async def api_items(request: Request, store_id: int | None = None):
                 key: item[key]
                 for key in (
                     "id",
+                    "inventory_id",
                     "number",
                     "product_name",
                     "status",
@@ -941,8 +1012,9 @@ async def api_branch_sell(request: Request):
     if store_id is None:
         branch = bot.branch_store()
         store_id = branch["id"] if branch else bot.main_store_id()
+    sale_price = as_number(payload.get("sale_price"), "sale_price", nullable=True)
     item, status, sale = bot.sell_branch_item(
-        int(store_id), number, user_id=user.get("id")
+        int(store_id), number, user_id=user.get("id"), sale_price=sale_price
     )
     if status == "not_found":
         raise HTTPException(status_code=404, detail="Bu raqamli gilam topilmadi")
@@ -962,6 +1034,54 @@ async def api_branch_sell(request: Request):
             },
         }
     return {"ok": True, "item": dict(refreshed or item), "sale": sale}
+
+
+@app.patch("/api/items/{item_id}")
+async def api_rename_item(item_id: int, request: Request):
+    user = require_panel_user(request)
+    payload = await json_payload(request)
+    new_number = str(payload.get("number", "")).strip()
+    if not new_number:
+        raise HTTPException(status_code=422, detail="Yangi raqam kerak")
+    conn = bot.db()
+    try:
+        row = conn.execute(
+            "SELECT * FROM inventory_items WHERE id=?", (item_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="Raqam topilmadi")
+    row = dict(row)
+    if user["role"] == "seller" and int(row["store_id"]) != require_seller_store(user):
+        raise HTTPException(status_code=403, detail="Bu sizning do'koningiz emas")
+    try:
+        updated = bot.rename_item_number(int(row["store_id"]), row["number"], new_number)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    return dict(updated)
+
+
+@app.delete("/api/items/{item_id}")
+async def api_delete_item(item_id: int, request: Request):
+    user = require_panel_user(request)
+    conn = bot.db()
+    try:
+        row = conn.execute(
+            "SELECT * FROM inventory_items WHERE id=?", (item_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="Raqam topilmadi")
+    row = dict(row)
+    if user["role"] == "seller" and int(row["store_id"]) != require_seller_store(user):
+        raise HTTPException(status_code=403, detail="Bu sizning do'koningiz emas")
+    try:
+        bot.delete_item_number(int(row["store_id"]), row["number"], user_id=user.get("id"))
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    return {"ok": True}
 
 
 @app.post("/api/branch/restock")

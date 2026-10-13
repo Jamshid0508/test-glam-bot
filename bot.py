@@ -856,6 +856,89 @@ def get_item_by_number(store_id: int, number: str, conn=None):
             conn.close()
 
 
+def rename_item_number(store_id: int, old_number: str, new_number: str, conn=None):
+    """Biriktirilgan yorliq raqamini o'zgartirish (faqat ombordagilar)."""
+    old = normalize_item_number(old_number)
+    new = normalize_item_number(new_number)
+    if not old or not new:
+        raise ValueError("Eski va yangi raqam kerak")
+    if old == new:
+        raise ValueError("Yangi raqam eskisi bilan bir xil")
+    close = False
+    if conn is None:
+        conn = db()
+        close = True
+    try:
+        item = conn.execute(
+            "SELECT * FROM inventory_items WHERE store_id=? AND number=?",
+            (store_id, old),
+        ).fetchone()
+        if not item:
+            raise ValueError(f"«{old}» raqamli gilam topilmadi")
+        if item["status"] != "in_stock":
+            raise ValueError(f"«{old}» raqamli gilam allaqachon sotilgan — uni o'zgartirib bo'lmaydi")
+        exists = conn.execute(
+            "SELECT id FROM inventory_items WHERE store_id=? AND number=?",
+            (store_id, new),
+        ).fetchone()
+        if exists:
+            raise ValueError(f"Bu raqam allaqachon ro'yxatda: {new}")
+        conn.execute(
+            "UPDATE inventory_items SET number=? WHERE id=?",
+            (new, item["id"]),
+        )
+        conn.commit()
+        return conn.execute(
+            "SELECT * FROM inventory_items WHERE id=?", (item["id"],)
+        ).fetchone()
+    finally:
+        if close:
+            conn.close()
+
+
+def delete_item_number(store_id: int, number: str, user_id: int | None = None, conn=None):
+    """Ombordagi raqamni o'chirish: qator o'chadi, qoldiq 1 taga kamayadi."""
+    num = normalize_item_number(number)
+    if not num:
+        raise ValueError("Raqam kerak")
+    close = False
+    if conn is None:
+        conn = db()
+        close = True
+    try:
+        item = conn.execute(
+            "SELECT * FROM inventory_items WHERE store_id=? AND number=?",
+            (store_id, num),
+        ).fetchone()
+        if not item:
+            raise ValueError(f"«{num}» raqamli gilam topilmadi")
+        if item["status"] != "in_stock":
+            raise ValueError(f"«{num}» raqamli gilam allaqachon sotilgan — uni o'chirib bo'lmaydi")
+        product = conn.execute(
+            "SELECT * FROM inventory WHERE id=?", (item["inventory_id"],)
+        ).fetchone()
+        if not product:
+            raise ValueError("Gilam omborda topilmadi")
+        conn.execute("DELETE FROM inventory_items WHERE id=?", (item["id"],))
+        apply_stock_delta(conn, int(item["inventory_id"]), -1)
+        record_movement(
+            conn,
+            int(item["inventory_id"]),
+            "adjustment",
+            -1,
+            product["unit"],
+            created_at=shop_now(),
+            note=f"Yorliq raqami o'chirildi: {num}",
+            store_id=store_id,
+            user_id=user_id,
+        )
+        conn.commit()
+        return True
+    finally:
+        if close:
+            conn.close()
+
+
 def list_items(store_id: int, status: str | None = None, conn=None):
     close = False
     if conn is None:
@@ -1743,6 +1826,18 @@ def build_application():
     )
     app.add_handler(
         CallbackQueryHandler(
+            user_callback(seller_edit_select_callback),
+            pattern=r"^seledit:",
+        )
+    )
+    app.add_handler(
+        CallbackQueryHandler(
+            user_callback(seller_edit_field_callback),
+            pattern=r"^seditf:",
+        )
+    )
+    app.add_handler(
+        CallbackQueryHandler(
             admin_callback(wizard_callback),
             pattern=r"^wiz:",
         )
@@ -1913,11 +2008,80 @@ async def seller_restock_callback(update: Update, context: ContextTypes.DEFAULT_
     )
 
 
+async def seller_edit_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Sotuvchi o'z gilamini tanlashi: narx/nom/o'lcham tahrirlash uchun."""
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    query = update.callback_query
+    await query.answer()
+    user = current_user(update)
+    store_id = seller_store_id(user)
+    if not user or user.get("role") != "seller" or store_id is None:
+        await query.edit_message_text("Sotuvchi do‘koni aniqlanmadi.")
+        return
+    try:
+        inventory_id = int((query.data or "").split(":")[1])
+    except (IndexError, ValueError):
+        await query.edit_message_text("Gilam tanlovi yaroqsiz. Qaytadan urinib ko‘ring.")
+        return
+    product = inventory_get_with_prices(inventory_id)
+    if not product or int(product.get("store_id") or 0) != int(store_id):
+        await query.edit_message_text("Bu gilam biriktirilgan do‘koningizda topilmadi.")
+        return
+    context.user_data["seller_edit"] = {"product_id": inventory_id}
+    await query.edit_message_text(
+        f"🧶 {product['name']}\n"
+        f"📐 O'lcham: {product.get('dimensions') or '—'}\n"
+        f"💵 Kelish: {fmt_money(product.get('purchase_price'))} so'm\n"
+        f"🏷 Sotish: {fmt_money(product.get('sale_price'))} so'm\n\n"
+        "Nimani o'zgartirasiz?",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("💵 Kelish narxi", callback_data="seditf:purchase"),
+                    InlineKeyboardButton("🏷 Sotish narxi", callback_data="seditf:sale"),
+                ],
+                [
+                    InlineKeyboardButton("🧶 Nomi", callback_data="seditf:name"),
+                    InlineKeyboardButton("📐 O‘lchami", callback_data="seditf:dimensions"),
+                ],
+                [InlineKeyboardButton("❌ Bekor qilish", callback_data="seditf:cancel")],
+            ]
+        ),
+    )
+
+
+async def seller_edit_field_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    pending = context.user_data.get("seller_edit")
+    if not pending or not pending.get("product_id"):
+        await query.edit_message_text("Tanlov eskirgan. Qaytadan urinib ko‘ring.")
+        return
+    field = (query.data or "").split(":")[1] if ":" in (query.data or "") else ""
+    if field == "cancel":
+        context.user_data.pop("seller_edit", None)
+        await query.edit_message_text("❌ Bekor qilindi.")
+        return
+    if field not in {"purchase", "sale", "name", "dimensions"}:
+        await query.edit_message_text("Noma'lum maydon.")
+        return
+    pending["field"] = field
+    prompts = {
+        "purchase": "💵 Yangi kelish narxini yozing (masalan: 500000 yoki 40$):",
+        "sale": "🏷 Yangi sotish narxini yozing (masalan: 650000 yoki 50$):",
+        "name": "🧶 Yangi nomni yozing:",
+        "dimensions": "📐 Yangi o'lchamni yozing (masalan: 3x4):",
+    }
+    await query.edit_message_text(prompts[field])
+
+
 def seller_menu_markup():
     return ReplyKeyboardMarkup(
         [
             [KeyboardButton("📦 Ombor"), KeyboardButton("🔢 Raqam bilan sotish")],
             [KeyboardButton("➕ Gilam qo‘shish"), KeyboardButton("➕ Raqam qo‘shish")],
+            [KeyboardButton("✏️ Gilam tahrirlash"), KeyboardButton("🔢 Raqam o‘zgartirish")],
             [KeyboardButton("📊 Bugungi savdom")],
         ],
         resize_keyboard=True,
@@ -1958,6 +2122,8 @@ def clear_seller_workflow(context: ContextTypes.DEFAULT_TYPE):
     for key in (
         "awaiting_item_number",
         "pending_branch_sale",
+        "seller_edit",
+        "seller_renumber",
         "br_add",
         "br_restock",
         "pending_inventory",
@@ -2306,6 +2472,9 @@ async def auth_or_seller_text(update: Update, context: ContextTypes.DEFAULT_TYPE
         "➕ Gilam qo'shish",
         "➕ Raqam qo‘shish",
         "➕ Raqam qo'shish",
+        "✏️ Gilam tahrirlash",
+        "🔢 Raqam o‘zgartirish",
+        "🔢 Raqam o'zgartirish",
         "📦 Ombor",
         "🏪 Mening do‘konim",
         "🔢 Raqam bilan sotish",
@@ -2355,6 +2524,31 @@ async def auth_or_seller_text(update: Update, context: ContextTypes.DEFAULT_TYPE
             return
         if text == "📊 Bugungi savdom":
             await seller_today_sales_message(update, context, user)
+            return
+        if text == "✏️ Gilam tahrirlash":
+            products = inventory_list(limit=500, store_id=store_id)
+            if not products:
+                await update.message.reply_text(
+                    "Bu do'konda tahrirlash uchun gilam yo'q.",
+                    reply_markup=seller_menu_markup(),
+                )
+                return
+            buttons = [
+                [InlineKeyboardButton(row["name"], callback_data=f"seledit:{row['id']}")]
+                for row in products
+            ]
+            await update.message.reply_text(
+                f"🏪 {store['name'] if store else 'Do‘kon'}\n"
+                "Qaysi gilamni tahrirlaysiz? Tanlang:",
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+            return
+        if text in {"🔢 Raqam o‘zgartirish", "🔢 Raqam o'zgartirish"}:
+            context.user_data["seller_renumber"] = {"step": "old"}
+            await update.message.reply_text(
+                "O'zgartiriladigan yorliq raqamini yozing (masalan: 001):",
+                reply_markup=seller_menu_markup(),
+            )
             return
 
     if context.user_data.get("entering_price_for_pending"):
@@ -2470,6 +2664,123 @@ async def auth_or_seller_text(update: Update, context: ContextTypes.DEFAULT_TYPE
                 item["product_name"], 1, item["product_unit"],
                 float(product["quantity"]) if product else 0, sale,
             ),
+            reply_markup=seller_menu_markup(),
+        )
+        return
+
+    # Sotuvchi: gilam tahrirlash (nom/o'lcham/kelish/sotish)
+    seller_edit = context.user_data.get("seller_edit")
+    if seller_edit and seller_edit.get("field"):
+        product_id = seller_edit["product_id"]
+        field = seller_edit["field"]
+        product = inventory_get_with_prices(int(product_id))
+        if not product or int(product.get("store_id") or 0) != int(store_id):
+            context.user_data.pop("seller_edit", None)
+            await update.message.reply_text("Bu gilam sizning do'koningizda topilmadi.")
+            return
+        if text.lower() in {"bekor", "cancel", "❌"}:
+            context.user_data.pop("seller_edit", None)
+            await update.message.reply_text("❌ Bekor qilindi.", reply_markup=seller_menu_markup())
+            return
+        try:
+            if field == "name":
+                new_name = text.strip()
+                if len(new_name) < 2:
+                    raise ValueError("Nom juda qisqa")
+                inventory_edit(
+                    int(product_id), new_name, product["unit"],
+                    float(product["quantity"]),
+                    product.get("purchase_price"), product.get("sale_price"),
+                    dimensions=product.get("dimensions"), area_sqm=product.get("area_sqm"),
+                    price_per_sqm_usd=product.get("price_per_sqm_usd"),
+                    purchase_price_usd=product.get("purchase_price_usd"),
+                )
+            elif field == "dimensions":
+                dim_res = extract_dimensions_and_area(text)
+                if not dim_res:
+                    raise ValueError("O'lchamni masalan 3x4 shaklida yozing")
+                dim_str, _w, _l, area = dim_res
+                inventory_edit(
+                    int(product_id), product["name"], product["unit"],
+                    float(product["quantity"]),
+                    product.get("purchase_price"), product.get("sale_price"),
+                    dimensions=dim_str, area_sqm=area,
+                    price_per_sqm_usd=product.get("price_per_sqm_usd"),
+                    purchase_price_usd=product.get("purchase_price_usd"),
+                )
+            else:
+                try:
+                    som, usd = parse_simple_price(text)
+                except ValueError as exc:
+                    raise ValueError(str(exc))
+                if som is None and usd is None:
+                    raise ValueError("Narxni son bilan yozing")
+                rate = get_usd_rate()
+                if field == "purchase":
+                    pp = round(usd * rate, 2) if usd is not None else som
+                    ppu = usd if usd is not None else (round(pp / rate, 2) if rate > 0 else None)
+                    inventory_edit(
+                        int(product_id), product["name"], product["unit"],
+                        float(product["quantity"]), pp, product.get("sale_price"),
+                        dimensions=product.get("dimensions"), area_sqm=product.get("area_sqm"),
+                        purchase_price_usd=ppu,
+                        price_per_sqm_usd=product.get("price_per_sqm_usd"),
+                    )
+                else:
+                    sp = round(usd * rate, 2) if usd is not None else som
+                    inventory_edit(
+                        int(product_id), product["name"], product["unit"],
+                        float(product["quantity"]),
+                        product.get("purchase_price"), sp,
+                        dimensions=product.get("dimensions"), area_sqm=product.get("area_sqm"),
+                        price_per_sqm_usd=product.get("price_per_sqm_usd"),
+                        purchase_price_usd=product.get("purchase_price_usd"),
+                    )
+        except ValueError as exc:
+            await update.message.reply_text(f"❌ {exc}. Qayta yozing (bekor uchun: bekor):")
+            return
+        context.user_data.pop("seller_edit", None)
+        updated = inventory_get_with_prices(int(product_id))
+        await update.message.reply_text(
+            f"✅ Saqlandi: {updated['name']}\n"
+            f"💵 Kelish: {fmt_money(updated.get('purchase_price'))} so'm\n"
+            f"🏷 Sotish: {fmt_money(updated.get('sale_price'))} so'm",
+            reply_markup=seller_menu_markup(),
+        )
+        return
+
+    # Sotuvchi: raqam o'zgartirish (eski -> yangi)
+    seller_renumber = context.user_data.get("seller_renumber")
+    if seller_renumber:
+        if text.lower() in {"bekor", "cancel", "❌"}:
+            context.user_data.pop("seller_renumber", None)
+            await update.message.reply_text("❌ Bekor qilindi.", reply_markup=seller_menu_markup())
+            return
+        if seller_renumber.get("step") == "old":
+            item = get_item_by_number(store_id, text)
+            if not item:
+                await update.message.reply_text(
+                    f"❌ «{text}» raqamli gilam topilmadi. Qayta yozing (bekor uchun: bekor):"
+                )
+                return
+            if item["status"] != "in_stock":
+                await update.message.reply_text("⚠️ Bu raqam allaqachon sotilgan. Boshqa raqam yozing:")
+                return
+            seller_renumber["old"] = normalize_item_number(text)
+            seller_renumber["step"] = "new"
+            await update.message.reply_text(
+                f"Tanlandi: {item['product_name']} (№{seller_renumber['old']}).\n"
+                "Yangi raqamni yozing:"
+            )
+            return
+        try:
+            updated_item = rename_item_number(store_id, seller_renumber["old"], text)
+        except ValueError as exc:
+            await update.message.reply_text(f"❌ {exc}. Qayta yozing (bekor uchun: bekor):")
+            return
+        context.user_data.pop("seller_renumber", None)
+        await update.message.reply_text(
+            f"✅ Raqam o'zgartirildi: {seller_renumber['old']} → {updated_item['number']}",
             reply_markup=seller_menu_markup(),
         )
         return
