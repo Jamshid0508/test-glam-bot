@@ -165,12 +165,13 @@ Tekshirish:
 
 Bot menyusidagi **➕ Gilam qo‘shish** tugmasi bitta gilam kiritish uchun,
 **📥 Ko‘p gilam kiritish** esa boshlang‘ich ombor ro‘yxatini birdaniga kiritish
-uchun. Har bir gilamni yangi qatorda `Nomi | miqdor | dona yoki metr` ko‘rinishida
-yuboring. Masalan:
+uchun. Har bir gilamni yangi qatorda sotish narxi bilan yuboring —
+narx kiritish shart. Masalan:
 
 ```text
-Sag | 7 | metr
-Katta Qizil Gul | 10 | dona
+Sag 7 metr sotish 250000
+Katta Qizil Gul 10 dona kelish 200000 sotish 300000
+Sag | 7 | metr | 200000 | 300000
 ```
 
 Omborda oldindan bor nomlar qayta qo‘shilmaydi; bot borligini va joriy qoldiqni
@@ -208,9 +209,10 @@ Yangi Elen gilami, 3 dona keldi, kelish narxi 500000, sotish narxi 650000
 Katta Qizil Gul 3 ga 4, 5 dona keldi, kelish narxi 3 dollardan kvadratiga
 ```
 
-Ovozli xabar avval Gemini bilan matnga aylantiriladi, keyin shu matn Gemini'ga
-alohida so'rovda JSON Schema bo'yicha tahlil uchun yuboriladi. Bot nom, o'lcham,
-miqdor va narxlarni tekshirib, saqlashdan oldin alohida maydonlarda ko'rsatadi.
+Ovozli xabar Gemini'ga bitta so'rovda yuboriladi: model ham matnni, ham
+buyruqni (nom, o'lcham, miqdor, narxlar, amal) JSON Schema bo'yicha bir yo'la
+qaytaradi. Bot nom, o'lcham, miqdor va narxlarni tekshirib, saqlashdan oldin
+alohida maydonlarda ko'rsatadi.
 Maydon va kvadrat narxidan bir gilamning jami kelish narxini kodning o'zi hisoblaydi.
 Yuqoridagi misolda 3 × 4 = 12 m²
 bo'lgani uchun kelish narxi avtomatik ravishda $36 (kvadratiga $3) qilib
@@ -218,7 +220,8 @@ hisoblanadi; so'm ekvivalenti joriy dollar kursidan olinadi. Ovozda kirim yoki
 sotuv amali aniq aytilmagan bo'lsa, bot
 hisobni ko'rsatib, **Omborga qo'shish** yoki **Sotish** tugmasini chiqaradi;
 sotuv faqat tugma bosilgandan keyin bajariladi. Miqdor aniq aytilmaganida
-amalni tanlash tugmalari berilmaydi. Sotish narxi aytilmasa, bot uni so'raydi;
+amalni tanlash tugmalari berilmaydi. Sotish narxi aytilmasa, bot uni so'raydi —
+sotish narxini kiritish shart, narxsiz omborga saqlab bo'lmaydi;
 narx kiritilgach saqlashdan oldingi tasdiqlash bosqichi ko'rsatiladi. Ko'p
 so'zli nomlar (masalan,
 "Katta Qizil Gul") saqlanadi va bot ularni to'liq nom bo'yicha solishtiradi.

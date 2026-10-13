@@ -563,13 +563,19 @@ async def api_create_product(request: Request):
     quantity = as_number(payload.get("quantity", 0), "quantity")
     if item_numbers:
         quantity = float(len(item_numbers))
+    sale_price = as_number(payload.get("sale_price"), "sale_price", nullable=True)
+    if sale_price is None:
+        raise HTTPException(
+            status_code=422,
+            detail="Sotish narxini kiritish shart — narxsiz gilam qo'shib bo'lmaydi",
+        )
     try:
         product = bot.inventory_create(
             name,
             unit,
             quantity,
             as_number(payload.get("purchase_price"), "purchase_price", nullable=True),
-            as_number(payload.get("sale_price"), "sale_price", nullable=True),
+            sale_price,
             dimensions=dimensions,
             area_sqm=area_sqm,
             price_per_sqm_usd=price_per_sqm_usd,
@@ -989,6 +995,8 @@ async def api_toggle_user(user_id: int, request: Request):
     target = bot.get_user(user_id)
     if not target:
         raise HTTPException(status_code=404, detail="Foydalanuvchi topilmadi")
+    if target["role"] == "admin":
+        raise HTTPException(status_code=403, detail="Adminni bloklab bo'lmaydi")
     bot.set_user_active(user_id, not target["is_active"])
     return bot.get_user(user_id)
 

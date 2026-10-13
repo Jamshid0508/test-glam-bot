@@ -448,12 +448,12 @@
       <label class="field">Kvadrat narxi ($)<input name="price_per_sqm_usd" type="text" inputmode="decimal" data-price-input placeholder="3.0"></label>
       <label class="field">Kelish narxi ($)<input name="purchase_price_usd" type="text" inputmode="decimal" data-price-input placeholder="36.0"></label>
       <label class="field">Kelish narxi (so‘m)<input name="purchase_price" type="text" inputmode="decimal" data-price-input placeholder="Belgilanmagan"></label>
-      <label class="field">Sotish narxi (so‘m)<input name="sale_price" type="text" inputmode="decimal" data-price-input placeholder="Belgilanmagan"></label>
+      <label class="field">Sotish narxi (so‘m) *<input name="sale_price" type="text" inputmode="decimal" data-price-input placeholder="Shart! Masalan: 300000"></label>
       <label class="field">O‘lchov birligi<select name="unit"><option value="dona">Dona</option><option value="metr">Metr</option></select></label>
       <label class="field">Ombor qoldig‘i<input name="quantity" type="number" min="0" step="0.01" required></label>
       <label class="field wide hidden" id="numbers-field">Yorliq raqamlari (faqat filial — har biri alohida qatorda yoki vergul bilan)<textarea name="item_numbers" rows="2" placeholder="QG-001, QG-002"></textarea></label>
     </div>
-    <p class="muted" style="margin-top:12px">O‘lcham va kvadrat narxi ($) kiritilsa, dona narxi ($) va so‘mda avtomatik hisoblanadi. Narxlar o‘zgarsa, sanasi bilan tarixda qoladi.</p>
+    <p class="muted" style="margin-top:12px">O‘lcham va kvadrat narxi ($) kiritilsa, dona narxi ($) va so‘mda avtomatik hisoblanadi. Narxlar o‘zgarsa, sanasi bilan tarixda qoladi. Yangi gilam qo‘shishda sotish narxini kiritish shart.</p>
     <div class="form-actions"><button type="button" class="button" data-close>Bekor qilish</button><button type="button" class="button danger hidden" id="dialog-delete-product">O‘chirish</button><button class="button primary" type="submit">Saqlash</button></div>
   </form></dialog>
   <dialog id="rate-dialog"><form id="rate-form" class="modal">
@@ -827,6 +827,10 @@
         payload.quantity = Number(payload.quantity);
         payload.purchase_price = parsePriceInput(payload.purchase_price);
         payload.sale_price = parsePriceInput(payload.sale_price);
+        if (!id && payload.sale_price === null) {
+          notify("Sotish narxini kiritish shart — narxsiz gilam qo'shib bo'lmaydi.");
+          return;
+        }
         payload.dimensions = (payload.dimensions || "").trim() || null;
         payload.price_per_sqm_usd = parsePriceInput(payload.price_per_sqm_usd);
         payload.purchase_price_usd = parsePriceInput(payload.purchase_price_usd);
@@ -1159,7 +1163,7 @@
             <td data-label="Do‘kon">${safe(u.store_name || "—")}</td>
             <td data-label="Qarzi">${u.outstanding_debt ? money(u.outstanding_debt) : "—"}</td>
             <td data-label="Holati">${u.is_active ? "Faol" : "🚫 Bloklangan"}</td>
-            <td data-label="Amal"><button class="button small" data-action="toggle-user" data-id="${u.id}">${u.is_active ? "Bloklash" : "Faollashtirish"}</button></td>
+            <td data-label="Amal">${u.role === "admin" ? "👑" : `<button class="button small" data-action="toggle-user" data-id="${u.id}">${u.is_active ? "Bloklash" : "Faollashtirish"}</button>`}</td>
           </tr>`).join("");
       }
       async function loadSettlements() {

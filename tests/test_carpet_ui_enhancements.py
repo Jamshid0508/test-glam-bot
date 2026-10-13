@@ -496,7 +496,7 @@ class CarpetUIEnhancementsTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict("os.environ", {"TEMP": str(self.temp_dir.name)}), patch.object(
             bot.asyncio,
             "to_thread",
-            new=AsyncMock(side_effect=[recognized, ai_parsed]),
+            new=AsyncMock(side_effect=[(recognized, ai_parsed)]),
         ) as to_thread_mock, patch.object(
             bot,
             "correct_voice_transcription",
@@ -504,14 +504,13 @@ class CarpetUIEnhancementsTests(unittest.IsolatedAsyncioTestCase):
         ):
             await bot.handle_voice(update, context)
 
-        self.assertEqual(to_thread_mock.await_count, 2)
+        self.assertEqual(to_thread_mock.await_count, 1)
         self.assertIs(
-            to_thread_mock.await_args_list[1].args[0],
-            bot.parse_command_with_ai,
+            to_thread_mock.await_args_list[0].args[0],
+            bot.gemini_voice_to_command,
         )
-        self.assertEqual(
-            to_thread_mock.await_args_list[1].args[1],
-            recognized,
+        self.assertTrue(
+            str(to_thread_mock.await_args_list[0].args[1]).endswith(".ogg")
         )
         self.assertIn("actionless_voice_data", context.user_data)
         self.assertEqual(message.reply_text.await_count, 2)

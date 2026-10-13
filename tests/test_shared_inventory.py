@@ -105,7 +105,13 @@ class SharedInventoryTests(unittest.IsolatedAsyncioTestCase):
     async def test_duplicate_product_name_returns_uzbek_message(self):
         bot.inventory_create("Sag gilami", "metr", 7, None, None)
         payload = json.dumps(
-            {"name": "Sag gilami", "unit": "metr", "quantity": 5}
+            {
+                "name": "Sag gilami",
+                "unit": "metr",
+                "quantity": 5,
+                "purchase_price": 100_000,
+                "sale_price": 150_000,
+            }
         ).encode()
 
         async def receive():
@@ -140,9 +146,9 @@ class SharedInventoryTests(unittest.IsolatedAsyncioTestCase):
         bot.inventory_create("Sag gilami", "metr", 7, None, None)
         message = SimpleNamespace(
             text=(
-                "Sag | 5 | metr\n"
-                "Sag gilami | 3 | metr\n"
-                "Yangi model | 2 | dona"
+                "Sag | 5 | metr | 100000 | 150000\n"
+                "Sag gilami | 3 | metr | 100000 | 150000\n"
+                "Yangi model | 2 | dona | 50000 | 80000"
             ),
             reply_text=AsyncMock(),
         )
@@ -158,6 +164,9 @@ class SharedInventoryTests(unittest.IsolatedAsyncioTestCase):
         added = bot.inventory_get_by_key(bot.inventory_key_for("Yangi model"))
         self.assertEqual(existing["quantity"], 7)
         self.assertEqual(added["quantity"], 2)
+        self.assertEqual(
+            bot.current_product_prices(added["id"])["sale_price"], 80_000
+        )
 
     async def test_settings_and_product_usd_api(self):
         # 1. Update USD rate via API
