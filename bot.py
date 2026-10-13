@@ -9,6 +9,7 @@ import os
 import re
 import secrets
 import sqlite3
+import threading
 import time
 from datetime import datetime, timedelta
 from difflib import SequenceMatcher
@@ -53,6 +54,8 @@ LOCAL_WEBAPP_DEV = os.getenv("LOCAL_WEBAPP_DEV", "").strip().lower() in {
     "yes",
 }
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+_database_schema_init_lock = threading.Lock()
+_initialized_database_schemas: set[tuple[str, str]] = set()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "").strip()
 WEB_APP_URL = os.getenv("WEB_APP_URL", "").strip()
@@ -297,7 +300,7 @@ def ensure_multi_store_schema(conn, generated_id: str):
         pass
 
 
-def db():
+def _open_database(*, initialize_schema: bool):
     if DATABASE_URL:
         import psycopg
 
@@ -344,6 +347,12 @@ def db():
                 data TEXT NOT NULL
             )
         """
+
+    if not initialize_schema:
+        return conn
+    if DATABASE_URL:
+        # Serialize schema bootstrap across Vercel cold-started instances.
+        conn.execute("SELECT pg_advisory_xact_lock(593269247062416289)")
 
     conn.execute(inventory_schema)
     conn.execute(user_data_schema)
@@ -482,6 +491,20 @@ def db():
     ensure_multi_store_schema(conn, generated_id)
     conn.commit()
     return conn
+
+
+def db():
+    database_key = (
+        ("postgres", DATABASE_URL)
+        if DATABASE_URL
+        else ("sqlite", str(DB_PATH.resolve()))
+    )
+    with _database_schema_init_lock:
+        if database_key not in _initialized_database_schemas:
+            conn = _open_database(initialize_schema=True)
+            _initialized_database_schemas.add(database_key)
+            return conn
+    return _open_database(initialize_schema=False)
 
 
 # ---------------------------------------------------------------------------
@@ -4487,7 +4510,7 @@ def extract_labeled_price(text: str, labels: str) -> float | None:
     return val if val >= 0 else None
 
 
-def parse_pending_inventory_prices(text: str) -> dict | None:
+def parse_pending_inventory_prices(text: str, area_sqm: float | None = None) -> dict | None:
     purchase = extract_labeled_price_value(
         text,
         r"kelish|olish|tannarx|sotib\s+olish",
@@ -4516,6 +4539,22 @@ def parse_pending_inventory_prices(text: str) -> dict | None:
         add_price("purchase", purchase)
         add_price("sale", sale)
         return prices or None
+
+    norm = normalize_text(text)
+    has_price_cue = bool(
+        re.search(
+            r"(\$|dollar|usd|so['’ʻ`]?m|som|sum|ming|million|mln|kelish|sotish|sotuv|tannarx|narx|kvadrat|kv\b|m2)",
+            norm,
+            re.IGNORECASE,
+        )
+    )
+    has_unit_word = bool(
+        re.search(r"\b(dona|ta|sht|metr)\b", norm, re.IGNORECASE)
+    )
+    # "10 dona" / "5 metr" — bu miqdor, narx emas. Pending narxni yutib
+    # yubormasligi uchun narx sifatida qabul qilmaymiz.
+    if has_unit_word and not has_price_cue:
+        return None
 
     tokens = list(re.finditer(r"\d[\d.,]*", text))
     amounts = []
@@ -4553,6 +4592,35 @@ def parse_pending_inventory_prices(text: str) -> dict | None:
 
     if not amounts or len(amounts) > 2:
         return None
+    if len(amounts) == 1 and area_sqm and float(area_sqm) > 0:
+        value, currency = amounts[0]
+        has_sqm_word = bool(
+            re.search(
+                r"(kvadrat|kv\b|m2|kvadratiga|kvadrati)",
+                normalize_text(text),
+                re.IGNORECASE,
+            )
+        )
+        # Yagona narx + o'lcham bo'lsa — bu kvadrat metr kelish narxi.
+        # Masalan: "3$", "3 dollar kvadratiga" => 25 m² uchun $75.
+        if currency == "usd" or has_sqm_word:
+            area = float(area_sqm)
+            if currency == "usd":
+                per_sqm_usd = float(value)
+                total_usd = round(per_sqm_usd * area, 2)
+                total_sum = round(total_usd * rate, 2) if rate > 0 else total_usd
+                return {
+                    "price_per_sqm_usd": per_sqm_usd,
+                    "purchase_price_usd": total_usd,
+                    "purchase_price": total_sum,
+                }
+            per_sqm_sum = float(value)
+            total_sum = round(per_sqm_sum * area, 2)
+            out = {"purchase_price": total_sum}
+            if rate > 0:
+                out["purchase_price_usd"] = round(total_sum / rate, 2)
+                out["price_per_sqm_usd"] = round(per_sqm_sum / rate, 2)
+            return out
     add_price("purchase", amounts[0] if len(amounts) == 2 else None)
     add_price("sale", amounts[1] if len(amounts) == 2 else amounts[0])
     return prices or None
@@ -6297,9 +6365,17 @@ async def inventory_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if query.data == "inv:add_price":
         context.user_data["entering_price_for_pending"] = True
+        sqm_hint = (
+            f"O'lcham: {pending.get('dimensions')} ({pending.get('area_sqm')} m²). "
+            "Bitta narx yozsangiz — bu kvadrat metr kelish narxi bo'ladi "
+            "(masalan: 3$).\n"
+            if pending.get("area_sqm")
+            else ""
+        )
         await query.edit_message_text(
             f"💰 “{pending['name']}” uchun narxlarni kiriting:\n\n"
             "❗️ Sotish narxini kiritish SHART — narxsiz saqlab bo‘lmaydi.\n"
+            f"{sqm_hint}"
             "Kelish va sotish narxini bitta xabarda yozing (so‘m yoki dollar).\n"
             "Masalan: 1 500 000 2 000 000 yoki 30$ 40$\n"
             "(Birinchi narx — kelish, ikkinchi narx — sotish)\n\n"
@@ -6484,6 +6560,53 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             )
                         )
                         return
+
+        if context.user_data.get("entering_price_for_pending"):
+            pending_inv = context.user_data.get("pending_inventory")
+            if pending_inv:
+                probe_v = parse_command(text)
+                norm_probe = normalize_product_name(probe_v.get("name") or "")
+                norm_pend = normalize_product_name(pending_inv.get("name") or "")
+                has_price_cue_v = bool(
+                    re.search(
+                        r"(\$|dollar|usd|so['’ʻ`]?m|som|sum|ming|million|mln|kelish|sotish|sotuv|tannarx|narx)",
+                        normalize_text(text),
+                        re.IGNORECASE,
+                    )
+                )
+                is_new_product_voice = (
+                    probe_v.get("action")
+                    and probe_v.get("name")
+                    and probe_v.get("quantity") is not None
+                    and norm_probe != norm_pend
+                    and not has_price_cue_v
+                )
+                if not is_new_product_voice:
+                    parsed_p = parse_pending_inventory_prices(
+                        text, area_sqm=pending_inv.get("area_sqm")
+                    )
+                    if parsed_p is not None:
+                        pending_inv.update(parsed_p)
+                        if pending_inv.get("sale_price") is None:
+                            await message.reply_text(
+                                "Kelish narxi qabul qilindi. Endi sotish narxini ayting "
+                                "(sotish narxisiz saqlab bo'lmaydi)."
+                            )
+                            return
+                        context.user_data.pop("entering_price_for_pending", None)
+                        text_preview, keyboard = pending_preview(pending_inv)
+                        await message.reply_text(
+                            f"✅ Narxlar yangilandi!\n\n{text_preview}",
+                            reply_markup=keyboard,
+                        )
+                        return
+                    await message.reply_text(
+                        f"❌ Bu narxga o'xshamadi — {pending_inv.get('name')} uchun "
+                        "narx ayting (masalan: 30$ 40$ yoki kvadratiga 3$)."
+                    )
+                    return
+                context.user_data.pop("entering_price_for_pending", None)
+                context.user_data.pop("pending_inventory", None)
 
         if parsed is None:
             if single_call_ok:
@@ -6948,8 +7071,40 @@ async def voice_action_callback(
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.pop("actionless_voice_data", None)
     text = (update.message.text or "").strip()
+
+    # 1) Ovozda miqdori aytilmagan gilamga "10 dona" kabi javob kelsa —
+    # uni narx emas, o'sha gilamning miqdori deb to'ldiramiz.
+    actionless = context.user_data.get("actionless_voice_data")
+    if actionless and not actionless.get("quantity_is_explicit"):
+        m_qty = re.match(
+            r"^\s*(\d+(?:[\.,]\d+)?)\s*(dona|ta|sht|metr|m\b)?\s*$",
+            text,
+            re.IGNORECASE,
+        )
+        if m_qty:
+            try:
+                qty_val = float(m_qty.group(1).replace(",", "."))
+            except ValueError:
+                qty_val = None
+            if qty_val and qty_val > 0:
+                unit_word = (m_qty.group(2) or "").lower()
+                unit_val = "metr" if unit_word in {"metr", "m"} else (actionless.get("unit") or "dona")
+                actionless["quantity"] = qty_val
+                actionless["unit"] = unit_val
+                actionless["quantity_is_explicit"] = True
+                preview, keyboard = actionless_voice_preview(actionless)
+                await update.message.reply_text(preview, reply_markup=keyboard)
+                return
+        # Miqdor kutilayotganda boshqa buyruq emas, miqdor so'raymiz.
+        # actionless ni o'chirmaymiz — keyingi xabar miqdor bo'lishi mumkin.
+        if not re.search(r"\d", text):
+            await update.message.reply_text(
+                "📦 Miqdorni yuboring (masalan: 10 dona yoki 7 metr)."
+            )
+            return
+    # Oddiy oqimda actionless eskirgan bo'ladi — tozalaymiz.
+    context.user_data.pop("actionless_voice_data", None)
 
     if context.user_data.get("usr_add"):
         await users_add_text_step(update, context)
@@ -7149,31 +7304,60 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Ma'lumot topilmadi. Qaytadan boshlang.")
             return
 
-        parsed_prices = parse_pending_inventory_prices(text)
-        if parsed_prices is None:
-            await update.message.reply_text(
-                "❌ Narxlarni aniqlay olmadim. Qayta yuboring:\n"
-                "• 1 500 000 2 000 000 (kelish, sotish)\n"
-                "• 30$ 40$ (kelish, sotish)\n"
-                "• 200000 (faqat sotish narxi)"
+        # Yangi gilam buyrug'i kelsa (nomi + amal boshqa bo'lsa) — eski
+        # pending ni yutib yubormaymiz, yangi buyruq sifatida davom etamiz.
+        probe = parse_command(text)
+        if (
+            probe.get("action")
+            and probe.get("name")
+            and probe.get("quantity") is not None
+            and normalize_product_name(probe["name"])
+            != normalize_product_name(pending.get("name") or "")
+        ):
+            context.user_data.pop("entering_price_for_pending", None)
+            context.user_data.pop("pending_inventory", None)
+        else:
+            parsed_prices = parse_pending_inventory_prices(
+                text, area_sqm=pending.get("area_sqm")
             )
-            return
-        pending.update(parsed_prices)
-        if pending.get("sale_price") is None:
-            await update.message.reply_text(
-                "❌ Sotish narxi kiritilmadi — narx kiritish shart, "
-                "narxsiz saqlab bo‘lmaydi.\n"
-                "Sotish narxini so‘m yoki dollarda yuboring (masalan: 250000):"
-            )
-            return
+            if parsed_prices is None:
+                await update.message.reply_text(
+                    "❌ Bu narxga o'xshamadi — joriy gilam uchun narxni Qayta yuboring, "
+                    f"boshqa gilamga o'tib ketmadik ({pending.get('name')}).\n"
+                    "• 1 500 000 2 000 000 (kelish, sotish)\n"
+                    "• 30$ 40$ (kelish, sotish)\n"
+                    + (
+                        "• 3$ (kvadratiga kelish narxi — "
+                        f"{pending.get('area_sqm')} m² uchun hisoblanadi)\n"
+                        if pending.get("area_sqm")
+                        else "• 200000 (faqat sotish narxi)\n"
+                    )
+                )
+                return
+            pending.update(parsed_prices)
+            if pending.get("sale_price") is None:
+                need_sale = ""
+                if pending.get("purchase_price") is not None or pending.get("purchase_price_usd") is not None:
+                    need_sale = (
+                        "Kelish narxi qabul qilindi. Endi sotish narxini yuboring "
+                        "(sotish narxisiz saqlab bo'lmaydi):"
+                    )
+                else:
+                    need_sale = (
+                        "❌ Sotish narxi kiritilmadi — narx kiritish shart, "
+                        "narxsiz saqlab bo'lmaydi.\n"
+                        "Sotish narxini so'm yoki dollarda yuboring (masalan: 250000):"
+                    )
+                await update.message.reply_text(need_sale)
+                return
 
-        context.user_data.pop("entering_price_for_pending", None)
-        text_preview, keyboard = pending_preview(pending)
-        await update.message.reply_text(
-            f"✅ Narxlar yangilandi!\n\n{text_preview}",
-            reply_markup=keyboard,
-        )
-        return
+            context.user_data.pop("entering_price_for_pending", None)
+            text_preview, keyboard = pending_preview(pending)
+            await update.message.reply_text(
+                f"✅ Narxlar yangilandi!\n\n{text_preview}",
+                reply_markup=keyboard,
+            )
+            return
 
     wizard_step = context.user_data.get("wizard_step")
     if wizard_step == "name":

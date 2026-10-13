@@ -31,33 +31,58 @@ async def lifespan(app: FastAPI):
         yield
         return
 
-    if not WEBHOOK_SECRET:
-        raise RuntimeError("Vercel WEBHOOK_SECRET environment variable is required")
-
-    telegram_application = build_application()
-    await telegram_application.initialize()
-    await bot.configure_web_app_menu(telegram_application)
-    if os.getenv("VERCEL_ENV") == "production":
-        production_url = os.getenv("VERCEL_PROJECT_PRODUCTION_URL", "").strip()
-        if not production_url:
-            raise RuntimeError(
-                "Vercel VERCEL_PROJECT_PRODUCTION_URL environment variable is required"
-            )
-        await telegram_application.bot.set_webhook(
-            url=f"https://{production_url}/webhook",
-            secret_token=WEBHOOK_SECRET,
-        )
-    await telegram_application.start()
-    app.state.telegram_application = telegram_application
+    # Panel API (dashboard/products/sales) Telegram app siz ham ishlashi kerak.
+    # Shuning uchun Telegram init xatosi panelni yiqitmasligi shart —
+    # faqat /webhook 503 qaytaradi, panel esa DB bilan ishlayveradi.
+    try:
+        if not WEBHOOK_SECRET:
+            print("WARNING: WEBHOOK_SECRET missing — webhook disabled, panel still works")
+        else:
+            telegram_application = build_application()
+            await telegram_application.initialize()
+            await bot.configure_web_app_menu(telegram_application)
+            if os.getenv("VERCEL_ENV") == "production":
+                production_url = os.getenv("VERCEL_PROJECT_PRODUCTION_URL", "").strip()
+                if production_url:
+                    await telegram_application.bot.set_webhook(
+                        url=f"https://{production_url}/webhook",
+                        secret_token=WEBHOOK_SECRET,
+                    )
+                else:
+                    print("WARNING: VERCEL_PROJECT_PRODUCTION_URL missing — webhook not set")
+            await telegram_application.start()
+            app.state.telegram_application = telegram_application
+    except Exception as exc:
+        import traceback
+        print(f"WARNING: Telegram init failed, panel continues without webhook: {exc!r}")
+        traceback.print_exc()
+        telegram_application = None
     try:
         yield
     finally:
-        await telegram_application.stop()
-        await telegram_application.shutdown()
-        telegram_application = None
+        if telegram_application is not None:
+            try:
+                await telegram_application.stop()
+                await telegram_application.shutdown()
+            except Exception:
+                pass
+            telegram_application = None
 
 
 app = FastAPI(lifespan=lifespan)
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    import traceback
+    if isinstance(exc, HTTPException):
+        raise exc
+    # Vercel Runtime Logs da ko'rinishi uchun traceback ni stdout ga chiqaramiz.
+    # Foydalanuvchiga ichki tafsilotni oshkor qilmaymiz.
+    print(f"Unhandled error on {request.method} {request.url.path}: {exc!r}")
+    traceback.print_exc()
+    from fastapi.responses import JSONResponse
+    return JSONResponse(status_code=500, content={"detail": "Ichki server xatosi"})
 
 
 def verify_telegram_init_data(init_data: str, bot_token: str, admin_id: str):
@@ -353,9 +378,7 @@ def seller_product_dict(row):
         return None
     return {
         key: item.get(key)
-        for key in ("id", "name", "unit", "quantity", "archived_at",
-                    "dimensions", "area_sqm", "sale_price", "purchase_price",
-                    "price_per_sqm_usd", "purchase_price_usd")
+        for key in ("id", "name", "unit", "quantity", "archived_at")
     }
 
 
@@ -480,10 +503,15 @@ async def api_dashboard(request: Request, start: str | None = None, end: str | N
     sales_rows = bot.sales_list(start_at, end_at, limit=10000)
     if store_id is not None:
         main_id = bot.main_store_id()
-        sales_rows = [
-            row for row in sales_rows
-            if (row["store_id"] if row["store_id"] is not None else main_id) == store_id
-        ]
+        filtered = []
+        for row in sales_rows:
+            try:
+                sid = row["store_id"] if "store_id" in dict(row) else None
+            except Exception:
+                sid = None
+            if (sid if sid is not None else main_id) == store_id:
+                filtered.append(row)
+        sales_rows = filtered
     aggregate = aggregate_sales(sales_rows, rate)
     products = bot.inventory_list_full(limit=1000, store_id=store_id)
     aggregate.update(
@@ -748,10 +776,15 @@ async def api_sales(
     sales_rows = bot.sales_list(start_at, end_at, limit=1000)
     if store_id is not None:
         main_id = bot.main_store_id()
-        sales_rows = [
-            row for row in sales_rows
-            if (row["store_id"] if row["store_id"] is not None else main_id) == store_id
-        ]
+        filtered = []
+        for row in sales_rows:
+            try:
+                sid = row["store_id"] if "store_id" in dict(row) else None
+            except Exception:
+                sid = None
+            if (sid if sid is not None else main_id) == store_id:
+                filtered.append(row)
+        sales_rows = filtered
     aggregate = aggregate_sales(sales_rows)
     aggregate.update({"start": first_day, "end": last_day})
     return aggregate

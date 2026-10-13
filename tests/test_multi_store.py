@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import bot
 
@@ -19,6 +19,18 @@ class MultiStoreTests(unittest.TestCase):
         bot.DB_PATH = self.previous_db_path
         bot.DATABASE_URL = self.previous_database_url
         self.temp_dir.cleanup()
+
+    def test_database_schema_is_initialized_once_per_database(self):
+        first_connection = bot.db()
+        first_connection.close()
+
+        with patch.object(
+            bot,
+            "ensure_multi_store_schema",
+            side_effect=AssertionError("schema bootstrap ran more than once"),
+        ):
+            second_connection = bot.db()
+            second_connection.close()
 
     def test_stores_seeded_and_existing_stock_goes_to_main(self):
         stores = bot.list_stores()
