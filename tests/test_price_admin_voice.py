@@ -334,6 +334,67 @@ class AdminBlockProtectionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(bot.get_user(admin["id"])["is_active"])
 
+    async def test_user_list_action_cancels_add_wizard(self):
+        seller = bot.create_user("sotuvchi", "parol123", "Ali", "seller")
+        query = SimpleNamespace(
+            data=f"usr:toggle:{seller['id']}",
+            answer=AsyncMock(),
+            edit_message_text=AsyncMock(),
+        )
+        context = SimpleNamespace(
+            user_data={
+                "usr_add": {
+                    "step": "password",
+                    "login": "newuser",
+                    "password": "temporary",
+                }
+            }
+        )
+
+        await bot.users_callback(
+            SimpleNamespace(callback_query=query), context
+        )
+
+        self.assertNotIn("usr_add", context.user_data)
+        self.assertFalse(bot.get_user(seller["id"])["is_active"])
+
+    async def test_main_menu_action_cancels_add_wizard(self):
+        message = SimpleNamespace(
+            text="📊 Bugungi sotuv",
+            reply_text=AsyncMock(),
+        )
+        context = SimpleNamespace(
+            user_data={
+                "usr_add": {
+                    "step": "password",
+                    "login": "newuser",
+                    "password": "temporary",
+                }
+            }
+        )
+        update = SimpleNamespace(message=message, effective_message=message)
+
+        with patch.object(bot, "daily_sales", new=AsyncMock()) as daily_sales:
+            await bot.handle_text(update, context)
+
+        daily_sales.assert_awaited_once_with(update, context)
+        self.assertNotIn("usr_add", context.user_data)
+
+    async def test_other_admin_inline_action_cancels_add_wizard(self):
+        handler = AsyncMock()
+        guarded = bot.admin_callback(handler)
+        update = SimpleNamespace(
+            effective_user=SimpleNamespace(id=100),
+            callback_query=SimpleNamespace(data="wh:refresh"),
+        )
+        context = SimpleNamespace(user_data={"usr_add": {"password": "temporary"}})
+
+        with patch.object(bot, "is_admin_user", return_value=True):
+            await guarded(update, context)
+
+        handler.assert_awaited_once_with(update, context)
+        self.assertNotIn("usr_add", context.user_data)
+
     def test_users_markup_has_no_admin_toggle(self):
         admin = bot.create_user("boss", "parol123", "Boss", "admin")
         seller = bot.create_user("sotuvchi", "parol123", "Ali", "seller")
