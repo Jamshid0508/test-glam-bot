@@ -1240,10 +1240,16 @@ def record_debt_payment(
             conn.close()
 
 
-def branch_restock(inventory_id: int, numbers, user_id: int | None = None):
-    """Adds more numbered pieces of an existing branch product: validates
-    and registers the label numbers, increases stock, records a purchase
-    movement. Returns the updated product."""
+def branch_restock(
+    inventory_id: int,
+    numbers,
+    user_id: int | None = None,
+    purchase_price: float | None = None,
+    purchase_price_usd: float | None = None,
+    price_per_sqm_usd: float | None = None,
+):
+    """Adds numbered pieces to an existing product and records the purchase
+    cost. Returns the updated product."""
     conn = db()
     try:
         product = conn.execute(
@@ -1251,17 +1257,55 @@ def branch_restock(inventory_id: int, numbers, user_id: int | None = None):
         ).fetchone()
         if not product:
             raise ValueError("Gilam topilmadi")
+        timestamp = shop_now()
+        prices = product_price_on(conn, inventory_id, timestamp)
+        incoming_purchase = (
+            purchase_price if purchase_price is not None else prices["purchase_price"]
+        )
+        incoming_purchase_usd = (
+            purchase_price_usd
+            if purchase_price_usd is not None
+            else prices["purchase_price_usd"]
+        )
+        incoming_sqm_usd = (
+            price_per_sqm_usd
+            if price_per_sqm_usd is not None
+            else prices["price_per_sqm_usd"]
+        )
         add_inventory_items(inventory_id, int(product["store_id"]), numbers, conn=conn)
         count = len([n for n in numbers if normalize_item_number(n)])
         apply_stock_delta(conn, inventory_id, count)
+        if (
+            purchase_price is not None
+            or purchase_price_usd is not None
+            or price_per_sqm_usd is not None
+        ):
+            set_product_prices(
+                conn,
+                inventory_id,
+                purchase_price,
+                prices["sale_price"],
+                effective_at=timestamp,
+                purchase_price_usd=purchase_price_usd,
+                price_per_sqm_usd=price_per_sqm_usd,
+            )
+            prices = product_price_on(conn, inventory_id, timestamp)
+            incoming_purchase = prices["purchase_price"]
+            incoming_purchase_usd = prices["purchase_price_usd"]
+        usd_rate = get_usd_rate(conn)
+        if incoming_purchase is None and incoming_purchase_usd is not None and usd_rate > 0:
+            incoming_purchase = round(incoming_purchase_usd * usd_rate, 2)
         record_movement(
             conn,
             inventory_id,
             "purchase",
             count,
             product["unit"],
-            created_at=shop_now(),
-            note="Filial kirimi — raqamlar qo‘shildi",
+            purchase_price=incoming_purchase,
+            purchase_price_usd=incoming_purchase_usd,
+            usd_rate=usd_rate,
+            created_at=timestamp,
+            note="Yangi kirim — raqamlar qo‘shildi",
             user_id=user_id,
         )
         conn.commit()

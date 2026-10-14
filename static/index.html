@@ -376,7 +376,7 @@
           <div><span style="color:#666">Raqam:</span> <strong id="bsc-number">—</strong></div>
           <div><span style="color:#666">Gilam:</span> <strong id="bsc-name">—</strong></div>
           <div><span style="color:#666">Miqdor:</span> <strong>1 dona</strong></div>
-          <label class="field" style="margin-top:8px">Qanchadan sotildi (so‘m)<input id="bsc-price" inputmode="decimal" data-price-input placeholder="Masalan: 150000"></label>
+          <label class="field" style="margin-top:8px">Qanchadan sotildi (so‘m)<input id="bsc-price" inputmode="decimal" data-price-input placeholder="Masalan: 150000" required></label>
           <div class="actions" style="margin-top:8px">
             <button id="bsc-confirm" class="button primary small">✅ Sotish</button>
             <button id="bsc-cancel" class="button small" type="button">Bekor qilish</button>
@@ -391,13 +391,13 @@
         <form id="branch-add-form" class="form-grid">
           <label class="field wide">Nomi<input id="branch-add-name" list="main-carpet-names" placeholder="Asosiy do‘kondan tanlang yoki qo‘lda yozing" required><datalist id="main-carpet-names"></datalist></label>
           <label class="field">O‘lchami<input id="branch-add-dim" placeholder="3x4"></label>
-          <label class="field">Kelish narxi<input id="branch-add-purchase" inputmode="decimal" data-price-input placeholder="500000"></label>
-          <label class="field">Sotish narxi *<input id="branch-add-sale" inputmode="decimal" data-price-input placeholder="650000" required></label>
+          <label class="field">Kelish narxi ($/m²)<input id="branch-add-purchase-sqm" inputmode="decimal" data-price-input placeholder="Masalan: 3$"></label>
+          <label class="field">Sotish narxi (so‘m)<input id="branch-add-sale" inputmode="decimal" data-price-input placeholder="Sotayotganda kiritish mumkin"></label>
           <label class="field wide">Yorliq raqamlari<textarea id="branch-add-numbers" rows="2" placeholder="QG-001, QG-002"></textarea></label>
           <div class="field"><label>&nbsp;</label><button class="button primary" type="submit">➕ Qo‘shish</button></div>
         </form>
         <div class="table-wrap"><table>
-          <thead><tr><th>Raqam</th><th>Gilam</th><th>Holati</th><th>Qo‘shilgan</th><th>Sotilgan</th><th>Amal</th></tr></thead>
+          <thead><tr><th>Raqam</th><th>Gilam</th><th>Holati</th><th>Qo‘shilgan</th><th>Amal</th></tr></thead>
           <tbody id="items-body"></tbody>
         </table></div>
         <div id="items-empty" class="empty hidden">Filialda raqamli gilam yo‘q.</div>
@@ -411,6 +411,7 @@
             <span><span style="color:#666">Qoldigʻi:</span> <strong id="rpi-qty">—</strong></span>
           </div>
           <label class="field wide">Raqamlar (vergul yoki yangi qator bilan)<textarea id="restock-numbers" rows="2" placeholder="010, 011"></textarea></label>
+          <label class="field wide">Yangi kelish narxi ($/m²)<input id="restock-purchase-sqm" inputmode="decimal" data-price-input placeholder="Masalan: 3$"></label>
           <div class="field"><label>&nbsp;</label><button class="button" type="submit">➕ Qo‘shish</button></div>
         </form>
       </div>
@@ -472,12 +473,12 @@
       <label class="field">Kvadrat narxi ($)<input name="price_per_sqm_usd" type="text" inputmode="decimal" data-price-input placeholder="3.0"></label>
       <label class="field">Kelish narxi ($)<input name="purchase_price_usd" type="text" inputmode="decimal" data-price-input placeholder="36.0"></label>
       <label class="field">Kelish narxi (so‘m)<input name="purchase_price" type="text" inputmode="decimal" data-price-input placeholder="Belgilanmagan"></label>
-      <label class="field">Sotish narxi (so‘m) *<input name="sale_price" type="text" inputmode="decimal" data-price-input placeholder="Shart! Masalan: 300000"></label>
+      <label class="field">Sotish narxi (so‘m)<input name="sale_price" type="text" inputmode="decimal" data-price-input placeholder="Sotayotganda kiritish mumkin"></label>
       <label class="field">O‘lchov birligi<select name="unit"><option value="dona">Dona</option><option value="metr">Metr</option></select></label>
-      <label class="field">Ombor qoldig‘i<input name="quantity" type="number" min="0" step="0.01" required></label>
-      <label class="field wide hidden" id="numbers-field">Yorliq raqamlari (faqat filial — har biri alohida qatorda yoki vergul bilan)<textarea name="item_numbers" rows="2" placeholder="QG-001, QG-002"></textarea></label>
+      <label class="field" id="quantity-field">Ombor qoldig‘i<input name="quantity" type="number" min="0" step="0.01" required></label>
+      <label class="field wide hidden" id="numbers-field"><span id="numbers-field-label">Yorliq raqamlari (har biri alohida qatorda yoki vergul bilan)</span><textarea name="item_numbers" rows="2" placeholder="QG-001, QG-002"></textarea></label>
     </div>
-    <p class="muted" style="margin-top:12px">O‘lcham va kvadrat narxi ($) kiritilsa, dona narxi ($) va so‘mda avtomatik hisoblanadi. Narxlar o‘zgarsa, sanasi bilan tarixda qoladi. Yangi gilam qo‘shishda sotish narxini kiritish shart.</p>
+    <p class="muted" style="margin-top:12px">O‘lcham va kvadrat narxi ($) kiritilsa, dona narxi ($) va so‘mda avtomatik hisoblanadi. Sotish narxini sotuv paytida kiritish mumkin. Yorliq raqamlarini vergul yoki yangi qator bilan ajrating.</p>
     <div class="form-actions"><button type="button" class="button" data-close>Bekor qilish</button><button type="button" class="button danger hidden" id="dialog-delete-product">O‘chirish</button><button class="button primary" type="submit">Saqlash</button></div>
   </form></dialog>
   <dialog id="rate-dialog"><form id="rate-form" class="modal">
@@ -539,6 +540,24 @@
       function parsePriceInput(value) {
         const normalized = normalizedNumber(value);
         return normalized === "" ? null : Number(normalized);
+      }
+      function areaFromDimensions(dimensions) {
+        const match = String(dimensions || "").match(/^(\d+(?:[\.,]\d+)?)\s*[xX\*]\s*(\d+(?:[\.,]\d+)?)/);
+        if (!match) return null;
+        const area = parseFloat(match[1].replace(",", ".")) * parseFloat(match[2].replace(",", "."));
+        return area > 0 ? area : null;
+      }
+      function purchaseCostFromSquarePrice(priceInput, dimensions, knownArea = null) {
+        const pricePerSqmUsd = parsePriceInput(priceInput);
+        if (pricePerSqmUsd === null) {
+          return { price_per_sqm_usd: null, purchase_price_usd: null };
+        }
+        const area = Number(knownArea) > 0 ? Number(knownArea) : areaFromDimensions(dimensions);
+        if (!area) throw new Error("Kelish narxini $/m² kiritish uchun gilam o‘lchamini yozing.");
+        return {
+          price_per_sqm_usd: pricePerSqmUsd,
+          purchase_price_usd: Math.round(pricePerSqmUsd * area * 100) / 100,
+        };
       }
       function formatPriceInput(input, preserveTrailingDecimal = false) {
         const oldValue = input.value;
@@ -791,6 +810,16 @@
         renderTopProducts(summary.sales);
         renderSalesChart(summary.sales);
       }
+      function updateProductEntryFields() {
+        const form = $("#product-form");
+        const isIndividual = form.elements.unit.value === "dona";
+        const hasNumbers = form.elements.item_numbers.value.trim().length > 0;
+        $("#numbers-field").classList.toggle("hidden", !isIndividual);
+        $("#quantity-field").classList.toggle("hidden", isIndividual && hasNumbers);
+        $("#numbers-field-label").textContent = form.elements.id.value
+          ? "Yangi yorliq raqamlari (har biri qoldiqqa 1 dona qo‘shadi)"
+          : "Yorliq raqamlari (har biri alohida qatorda yoki vergul bilan)";
+      }
       function openProduct(product = null) {
         const form = $("#product-form");
         form.reset();
@@ -809,7 +838,7 @@
           form.elements.quantity.value = 0;
         }
         form.querySelectorAll("[data-price-input]").forEach((input) => formatPriceInput(input));
-        $("#numbers-field").classList.toggle("hidden", Boolean(product) || state.storeId !== state.branchId);
+        updateProductEntryFields();
         const delBtn = $("#dialog-delete-product");
         if (delBtn) {
           delBtn.classList.toggle("hidden", !product || !product.id);
@@ -851,10 +880,6 @@
         payload.quantity = Number(payload.quantity);
         payload.purchase_price = parsePriceInput(payload.purchase_price);
         payload.sale_price = parsePriceInput(payload.sale_price);
-        if (!id && payload.sale_price === null) {
-          notify("Sotish narxini kiritish shart — narxsiz gilam qo'shib bo'lmaydi.");
-          return;
-        }
         payload.dimensions = (payload.dimensions || "").trim() || null;
         payload.price_per_sqm_usd = parsePriceInput(payload.price_per_sqm_usd);
         payload.purchase_price_usd = parsePriceInput(payload.purchase_price_usd);
@@ -868,10 +893,10 @@
         }
         if (!id) {
           payload.store_id = state.storeId;
-          const numbersText = (payload.item_numbers || "").trim();
-          if (numbersText) payload.item_numbers = numbersText.split(/[\n,;]+/).map((n) => n.trim()).filter(Boolean);
-          else delete payload.item_numbers;
         }
+        const numbersText = (payload.item_numbers || "").trim();
+        if (numbersText) payload.item_numbers = numbersText.split(/[\n,;]+/).map((n) => n.trim()).filter(Boolean);
+        else delete payload.item_numbers;
         try {
           await api(id ? `/api/products/${id}` : "/api/products", { method: id ? "PATCH" : "POST", body: JSON.stringify(payload) });
           $("#product-dialog").close();
@@ -894,6 +919,8 @@
         }
       });
       const prodForm = $("#product-form");
+      prodForm.elements.item_numbers.addEventListener("input", updateProductEntryFields);
+      prodForm.elements.unit.addEventListener("change", updateProductEntryFields);
       function autoCalcProductFields() {
         const dimStr = (prodForm.elements.dimensions.value || "").trim();
         const sqmRate = parsePriceInput(prodForm.elements.price_per_sqm_usd.value);
@@ -1178,7 +1205,6 @@
             <td data-label="Gilam">${safe(item.product_name || "")}</td>
             <td data-label="Holati">${item.status === "sold" ? '<span class="badge archived">Sotilgan</span>' : "Omborda"}</td>
             <td data-label="Qo‘shilgan">${safe(String(item.created_at || "").slice(0, 10))}</td>
-            <td data-label="Sotilgan">${item.sold_at ? safe(String(item.sold_at).slice(0, 10)) : "—"}</td>
             <td data-label="Amal"><div class="actions">${item.status === "sold"
               ? '<span class="muted">—</span>'
               : `<button class="button small" data-action="rename-item" data-id="${item.id}" data-number="${safe(item.number)}">✏️ Raqam</button>
@@ -1340,19 +1366,37 @@
         const numbers = $("#branch-add-numbers").value.split(/[\n,;]+/).map((n) => n.trim()).filter(Boolean);
         if (!name) { notify("Nomni yozing."); return; }
         try {
-          await api("/api/products", { method: "POST", body: JSON.stringify({
-            name,
-            unit: "dona",
-            quantity: numbers.length,
-            dimensions: $("#branch-add-dim").value.trim() || null,
-            purchase_price: parsePriceInput($("#branch-add-purchase").value),
-            sale_price: parsePriceInput($("#branch-add-sale").value),
-            store_id: state.branchId,
-            item_numbers: numbers.length ? numbers : undefined,
-          }) });
+          if (!numbers.length) throw new Error("Gilamlarning yorliq raqamlarini kiriting.");
+          const dimensions = $("#branch-add-dim").value.trim() || null;
+          const cost = purchaseCostFromSquarePrice(
+            $("#branch-add-purchase-sqm").value,
+            dimensions,
+          );
+          const existing = (state.branchProducts || []).find(
+            (product) => product.name.trim().toLocaleLowerCase("uz-UZ") === name.toLocaleLowerCase("uz-UZ"),
+          );
+          if (existing) {
+            await api("/api/branch/restock", { method: "POST", body: JSON.stringify({
+              inventory_id: existing.id,
+              numbers,
+              ...cost,
+            }) });
+          } else {
+            await api("/api/products", { method: "POST", body: JSON.stringify({
+              name,
+              unit: "dona",
+              quantity: numbers.length,
+              dimensions,
+              purchase_price_usd: cost.purchase_price_usd,
+              price_per_sqm_usd: cost.price_per_sqm_usd,
+              sale_price: parsePriceInput($("#branch-add-sale").value),
+              store_id: state.branchId,
+              item_numbers: numbers,
+            }) });
+          }
           event.currentTarget.reset();
           await loadBranch();
-          notify("Gilam qo'shildi.");
+          notify(existing ? "Mavjud gilamga yangi kirim qo‘shildi." : "Gilam qo'shildi.");
         } catch (error) { notify(error.message); }
       });
       function updateRestockInfo() {
@@ -1371,8 +1415,22 @@
         const numbers = $("#restock-numbers").value.split(/[\n,;]+/).map((n) => n.trim()).filter(Boolean);
         if (!numbers.length) { notify("Raqamlarni yozing."); return; }
         try {
-          await api("/api/branch/restock", { method: "POST", body: JSON.stringify({ inventory_id: Number($("#restock-product").value), numbers }) });
+          const product = (state.branchProducts || []).find(
+            (item) => String(item.id) === String($("#restock-product").value),
+          );
+          if (!product) throw new Error("Gilam ro‘yxati yangilangan. Qayta yuklang.");
+          const cost = purchaseCostFromSquarePrice(
+            $("#restock-purchase-sqm").value,
+            product.dimensions,
+            product.area_sqm,
+          );
+          await api("/api/branch/restock", { method: "POST", body: JSON.stringify({
+            inventory_id: product.id,
+            numbers,
+            ...cost,
+          }) });
           $("#restock-numbers").value = "";
+          $("#restock-purchase-sqm").value = "";
           await loadBranch();
           notify("Raqamlar qo‘shildi, qoldiq yangilandi.");
         } catch (error) { notify(error.message); }

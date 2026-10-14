@@ -591,6 +591,10 @@ async def api_create_product(request: Request):
         raise HTTPException(status_code=422, detail="Name and valid unit are required")
     dimensions = str(payload.get("dimensions", "")).strip() or None
     area_sqm = as_number(payload.get("area_sqm"), "area_sqm", nullable=True)
+    if area_sqm is None:
+        dimension_data = bot.extract_dimensions_and_area(dimensions or name)
+        if dimension_data:
+            area_sqm = dimension_data[3]
     price_per_sqm_usd = as_number(payload.get("price_per_sqm_usd"), "price_per_sqm_usd", nullable=True)
     purchase_price_usd = as_number(payload.get("purchase_price_usd"), "purchase_price_usd", nullable=True)
     store_id = payload.get("store_id")
@@ -599,6 +603,8 @@ async def api_create_product(request: Request):
     item_numbers = payload.get("item_numbers") or None
     if isinstance(item_numbers, str):
         item_numbers = [n for n in item_numbers.replace("\n", ",").split(",") if n.strip()]
+    if item_numbers and unit != "dona":
+        raise HTTPException(status_code=422, detail="Yorliq raqamlari faqat dona gilamga qo‘shiladi")
     if user["role"] == "seller":
         if unit != "dona" or not item_numbers:
             raise HTTPException(
@@ -609,11 +615,14 @@ async def api_create_product(request: Request):
     if item_numbers:
         quantity = float(len(item_numbers))
     sale_price = as_number(payload.get("sale_price"), "sale_price", nullable=True)
-    if sale_price is None:
-        raise HTTPException(
-            status_code=422,
-            detail="Sotish narxini kiritish shart — narxsiz gilam qo'shib bo'lmaydi",
-        )
+    if price_per_sqm_usd is not None:
+        if not area_sqm or area_sqm <= 0:
+            raise HTTPException(
+                status_code=422,
+                detail="Kvadrat narxini hisoblash uchun gilam o‘lchamini kiriting",
+            )
+        purchase_price_usd = round(price_per_sqm_usd * area_sqm, 2)
+        purchase_price = round(purchase_price_usd * bot.get_usd_rate(), 2)
     try:
         product = bot.inventory_create(
             name,
@@ -650,10 +659,21 @@ async def api_create_product(request: Request):
 async def api_edit_product(product_id: int, request: Request):
     user = require_panel_user(request)
     payload = await json_payload(request)
+    item_numbers = payload.get("item_numbers") or []
+    if isinstance(item_numbers, str):
+        item_numbers = [
+            number.strip()
+            for number in item_numbers.replace("\n", ",").split(",")
+            if number.strip()
+        ]
+    if not isinstance(item_numbers, list):
+        raise HTTPException(status_code=422, detail="Yorliq raqamlari noto‘g‘ri")
     current = bot.inventory_get(product_id)
     if not current:
         raise HTTPException(status_code=404, detail="Product not found")
     current = dict(current)
+    if item_numbers and current.get("unit") != "dona":
+        raise HTTPException(status_code=422, detail="Yorliq raqamlari faqat dona gilamga qo‘shiladi")
     if user["role"] == "seller":
         own = require_seller_store(user)
         if int(current.get("store_id") or 0) != int(own):
@@ -718,13 +738,26 @@ async def api_edit_product(product_id: int, request: Request):
             )
         if status == "not_found":
             raise HTTPException(status_code=404, detail="Product not found")
+        if item_numbers:
+            try:
+                product = bot.branch_restock(
+                    product_id, item_numbers, user_id=user.get("id")
+                )
+            except ValueError as error:
+                raise HTTPException(status_code=422, detail=str(error)) from error
         return seller_product_dict(product)
     name = str(payload.get("name", "")).strip()
     unit = str(payload.get("unit", "dona")).strip().lower()
     if not name or unit not in {"dona", "metr"}:
         raise HTTPException(status_code=422, detail="Name and valid unit are required")
+    if item_numbers and unit != "dona":
+        raise HTTPException(status_code=422, detail="Yorliq raqamlari faqat dona gilamga qo‘shiladi")
     existing_prices = dict(bot.current_product_prices(product_id))
-    quantity = as_number(payload.get("quantity", current["quantity"]), "quantity")
+    quantity = (
+        float(current["quantity"])
+        if item_numbers
+        else as_number(payload.get("quantity", current["quantity"]), "quantity")
+    )
     purchase_price = as_number(
         payload.get("purchase_price", existing_prices["purchase_price"]),
         "purchase_price",
@@ -777,6 +810,13 @@ async def api_edit_product(product_id: int, request: Request):
         )
     if status == "not_found":
         raise HTTPException(status_code=404, detail="Product not found")
+    if item_numbers:
+        try:
+            product = bot.branch_restock(
+                product_id, item_numbers, user_id=user.get("id")
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
     return product_dict(product)
 
 
@@ -1027,6 +1067,11 @@ async def api_branch_sell(request: Request):
         branch = bot.branch_store()
         store_id = branch["id"] if branch else bot.main_store_id()
     sale_price = as_number(payload.get("sale_price"), "sale_price", nullable=True)
+    if user["role"] == "seller" and (sale_price is None or sale_price <= 0):
+        raise HTTPException(
+            status_code=422,
+            detail="Sotilgan narxni kiriting",
+        )
     item, status, sale = bot.sell_branch_item(
         int(store_id), number, user_id=user.get("id"), sale_price=sale_price
     )
@@ -1113,8 +1158,32 @@ async def api_branch_restock(request: Request):
         raise HTTPException(status_code=404, detail="Mahsulot topilmadi")
     if user["role"] == "seller" and product["store_id"] != require_seller_store(user):
         raise HTTPException(status_code=403, detail="Bu sizning do'koningiz emas")
+    purchase_price = as_number(
+        payload.get("purchase_price"), "purchase_price", nullable=True
+    )
+    purchase_price_usd = as_number(
+        payload.get("purchase_price_usd"), "purchase_price_usd", nullable=True
+    )
+    price_per_sqm_usd = as_number(
+        payload.get("price_per_sqm_usd"), "price_per_sqm_usd", nullable=True
+    )
+    if price_per_sqm_usd is not None:
+        area_sqm = float(product["area_sqm"] or 0)
+        if area_sqm <= 0:
+            raise HTTPException(
+                status_code=422,
+                detail="Kvadrat narxini hisoblash uchun gilam o‘lchami topilmadi",
+            )
+        purchase_price_usd = round(price_per_sqm_usd * area_sqm, 2)
     try:
-        updated = bot.branch_restock(int(inventory_id), numbers, user_id=user.get("id"))
+        updated = bot.branch_restock(
+            int(inventory_id),
+            numbers,
+            user_id=user.get("id"),
+            purchase_price=purchase_price,
+            purchase_price_usd=purchase_price_usd,
+            price_per_sqm_usd=price_per_sqm_usd,
+        )
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     return (

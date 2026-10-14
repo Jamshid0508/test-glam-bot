@@ -169,6 +169,8 @@ class PanelApiTests(unittest.IsolatedAsyncioTestCase):
             2,
             100_000,
             200_000,
+            dimensions="3x4",
+            area_sqm=12,
             store_id=branch["id"],
             item_numbers=["PANEL-001", "PANEL-002"],
         )
@@ -190,9 +192,22 @@ class PanelApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("sale_price", items[0])
         self.assertNotIn("purchase_price", items[0])
 
+        with self.assertRaises(HTTPException) as raised:
+            await app.api_branch_sell(
+                make_request(
+                    {"number": "PANEL-001", "store_id": bot.main_store_id()},
+                    cookie=cookie,
+                )
+            )
+        self.assertEqual(raised.exception.status_code, 422)
+
         sale = await app.api_branch_sell(
             make_request(
-                {"number": "PANEL-001", "store_id": bot.main_store_id()},
+                {
+                    "number": "PANEL-001",
+                    "store_id": bot.main_store_id(),
+                    "sale_price": 250_000,
+                },
                 cookie=cookie,
             )
         )
@@ -204,7 +219,13 @@ class PanelApiTests(unittest.IsolatedAsyncioTestCase):
         )
         today = await app.api_my_today_sales(seller_request)
         self.assertEqual(today["sales_count"], 1)
-        self.assertEqual(today["revenue"], 200_000)
+        self.assertEqual(today["revenue"], 250_000)
+        product_after_sale = next(
+            item
+            for item in bot.inventory_list_full(store_id=branch["id"])
+            if item["id"] == products[0]["id"]
+        )
+        self.assertEqual(product_after_sale["total_profit"], 150_000)
 
         with self.assertRaises(HTTPException) as raised:
             await app.api_users(seller_request)
@@ -228,6 +249,8 @@ class PanelApiTests(unittest.IsolatedAsyncioTestCase):
                     "name": "SellerLabeledProduct",
                     "unit": "dona",
                     "quantity": 99,
+                    "dimensions": "3x4",
+                    "area_sqm": 12,
                     "purchase_price": 110_000,
                     "sale_price": 210_000,
                     "store_id": bot.main_store_id(),
@@ -248,11 +271,39 @@ class PanelApiTests(unittest.IsolatedAsyncioTestCase):
                 {
                     "inventory_id": created["id"],
                     "numbers": ["PANEL-004"],
+                    "price_per_sqm_usd": 3,
                 },
                 cookie=cookie,
             )
         )
         self.assertEqual(restocked["quantity"], 2)
+        restocked_prices = bot.current_product_prices(created["id"])
+        self.assertEqual(restocked_prices["purchase_price_usd"], 36)
+        self.assertEqual(restocked_prices["price_per_sqm_usd"], 3)
+
+        created_without_sale_price = await app.api_create_product(
+            make_request(
+                {
+                    "name": "NoDefaultSalePrice",
+                    "unit": "dona",
+                    "dimensions": "3x4",
+                    "area_sqm": 12,
+                    "purchase_price_usd": 36,
+                    "price_per_sqm_usd": 3,
+                    "item_numbers": ["PANEL-005"],
+                },
+                cookie=cookie,
+            )
+        )
+        self.assertIsNone(
+            bot.current_product_prices(created_without_sale_price["id"])["sale_price"]
+        )
+        self.assertEqual(
+            bot.current_product_prices(created_without_sale_price["id"])[
+                "purchase_price_usd"
+            ],
+            36,
+        )
 
     async def test_seller_can_get_main_store_product_names_for_branch_add(self):
         branch = bot.branch_store()

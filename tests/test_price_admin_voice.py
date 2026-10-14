@@ -204,21 +204,8 @@ class PriceRequiredTests(unittest.IsolatedAsyncioTestCase):
             bot.current_product_prices(added["id"])["sale_price"], 80_000
         )
 
-    async def test_api_create_product_requires_sale_price(self):
+    async def test_api_create_product_allows_missing_sale_price(self):
         first, second, third = _local_admin()
-        with first, second, third:
-            with self.assertRaises(HTTPException) as raised:
-                await app.api_create_product(
-                    _local_request(
-                        {"name": "NoPrice", "unit": "dona", "quantity": 1}
-                    )
-                )
-        self.assertEqual(raised.exception.status_code, 422)
-        self.assertIn("shart", raised.exception.detail.lower())
-        self.assertIsNone(
-            bot.inventory_get_by_key(bot.inventory_key_for("NoPrice"))
-        )
-
         with first, second, third:
             created = await app.api_create_product(
                 _local_request(
@@ -226,11 +213,72 @@ class PriceRequiredTests(unittest.IsolatedAsyncioTestCase):
                         "name": "NoPrice",
                         "unit": "dona",
                         "quantity": 1,
-                        "sale_price": 150_000,
                     }
                 )
             )
         self.assertEqual(created["name"], "NoPrice")
+        self.assertIsNone(bot.current_product_prices(created["id"])["sale_price"])
+
+    async def test_api_create_product_calculates_total_usd_purchase_cost(self):
+        first, second, third = _local_admin()
+        with first, second, third:
+            created = await app.api_create_product(
+                _local_request(
+                    {
+                        "name": "SquareCostCarpet",
+                        "unit": "dona",
+                        "dimensions": "3x4",
+                        "quantity": 1,
+                        "price_per_sqm_usd": 3,
+                    }
+                )
+            )
+
+        prices = bot.current_product_prices(created["id"])
+        self.assertEqual(created["area_sqm"], 12)
+        self.assertEqual(prices["price_per_sqm_usd"], 3)
+        self.assertEqual(prices["purchase_price_usd"], 36)
+
+    async def test_main_store_zero_stock_product_can_be_replenished(self):
+        product = bot.inventory_create(
+            "Main Restock 3x4",
+            "dona",
+            1,
+            100_000,
+            None,
+            dimensions="3x4",
+            area_sqm=12,
+            item_numbers=["MAIN-001"],
+        )
+        _, status, _ = bot.sell_branch_item(
+            bot.main_store_id(), "MAIN-001", sale_price=200_000
+        )
+        self.assertEqual(status, "ok")
+        self.assertEqual(bot.inventory_get(product["id"])["quantity"], 0)
+
+        first, second, third = _local_admin()
+        with first, second, third:
+            updated = await app.api_edit_product(
+                product["id"],
+                _local_request(
+                    {
+                        "name": "Main Restock 3x4",
+                        "unit": "dona",
+                        "quantity": 0,
+                        "purchase_price_usd": 36,
+                        "price_per_sqm_usd": 3,
+                        "item_numbers": ["MAIN-002", "MAIN-003"],
+                    },
+                    method="PATCH",
+                ),
+            )
+
+        self.assertEqual(updated["quantity"], 2)
+        self.assertIsNone(updated["archived_at"])
+        self.assertEqual(
+            bot.current_product_prices(product["id"])["purchase_price_usd"],
+            36,
+        )
 
 
 class AdminBlockProtectionTests(unittest.IsolatedAsyncioTestCase):

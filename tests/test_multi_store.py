@@ -136,13 +136,32 @@ class MultiStoreTests(unittest.TestCase):
     def test_branch_restock_adds_numbers_and_stock(self):
         branch = bot.branch_store()
         product = bot.inventory_create(
-            "Sag", "dona", 1, 100_000, 150_000,
+            "Sag 3x4", "dona", 1, 100_000, 150_000,
+            dimensions="3x4", area_sqm=12,
             store_id=branch["id"], item_numbers=["R-1"],
         )
-        updated = bot.branch_restock(product["id"], ["R-2", "R-3"])
-        self.assertEqual(updated["quantity"], 3)
+        _, status, _ = bot.sell_branch_item(
+            branch["id"], "R-1", sale_price=200_000
+        )
+        self.assertEqual(status, "ok")
+        self.assertEqual(bot.inventory_get(product["id"])["quantity"], 0)
+        self.assertIn(
+            product["id"],
+            {item["id"] for item in bot.inventory_list_full(store_id=branch["id"])},
+        )
+
+        updated = bot.branch_restock(
+            product["id"],
+            ["R-2", "R-3"],
+            purchase_price_usd=36,
+            price_per_sqm_usd=3,
+        )
+        self.assertEqual(updated["quantity"], 2)
+        prices = bot.current_product_prices(product["id"])
+        self.assertEqual(prices["purchase_price_usd"], 36)
+        self.assertEqual(prices["price_per_sqm_usd"], 3)
         items = bot.list_items(branch["id"], status="in_stock")
-        self.assertEqual(len(items), 3)
+        self.assertEqual(len(items), 2)
         with self.assertRaises(ValueError):
             bot.branch_restock(product["id"], ["R-2"])
 
