@@ -389,7 +389,7 @@
         </table></div>
         <h3 style="margin:18px 0 8px;font-size:14px">Yangi gilam qo‘shish</h3>
         <form id="branch-add-form" class="form-grid">
-          <label class="field wide">Nomi<input id="branch-add-name" placeholder="Masalan: Sag 3x4" required></label>
+          <label class="field wide">Nomi<input id="branch-add-name" list="main-carpet-names" placeholder="Asosiy do‘kondan tanlang yoki qo‘lda yozing" required><datalist id="main-carpet-names"></datalist></label>
           <label class="field">O‘lchami<input id="branch-add-dim" placeholder="3x4"></label>
           <label class="field">Kelish narxi<input id="branch-add-purchase" inputmode="decimal" data-price-input placeholder="500000"></label>
           <label class="field">Sotish narxi *<input id="branch-add-sale" inputmode="decimal" data-price-input placeholder="650000" required></label>
@@ -512,7 +512,7 @@
       const initData = tg ? tg.initData : "";
       const localHost = ["localhost", "127.0.0.1", "::1"].includes(location.hostname);
       const localTest = !initData && localHost;
-      const state = { products: [], sales: [], summary: null, start: "", end: "", usd_rate: 12850, stores: [], storeId: null, branchId: null, me: null, items: [], globalStore: "", branchProducts: [] };
+      const state = { products: [], sales: [], summary: null, start: "", end: "", usd_rate: 12850, stores: [], storeId: null, branchId: null, mainStoreId: null, me: null, items: [], globalStore: "", branchProducts: [], users: [] };
       const $ = (selector) => document.querySelector(selector);
       const money = (value) => value == null ? "—" : `${new Intl.NumberFormat("uz-UZ", { maximumFractionDigits: 0 }).format(value)} so‘m`;
       const qty = (value) => new Intl.NumberFormat("uz-UZ", { maximumFractionDigits: 2 }).format(Number(value || 0));
@@ -990,6 +990,16 @@
               await api(`/api/users/${id}/toggle`, { method: "POST" });
               await loadUsers(); notify("Foydalanuvchi holati o‘zgartirildi.");
             }
+            if (action.dataset.action === "delete-user") {
+              const user = state.users.find((item) => item.id === id);
+              if (!user) throw new Error("Foydalanuvchi ro‘yxati eskirgan. Sahifani yangilang.");
+              const name = user.display_name || user.login;
+              if (confirm(`“${name}” (@${user.login}) foydalanuvchisi o‘chirilsinmi?\n\nBu amalni qaytarib bo‘lmaydi. Savdo va qarzlar tarixi saqlanadi.`)) {
+                await api(`/api/users/${id}`, { method: "DELETE" });
+                await loadUsers();
+                notify("Foydalanuvchi o‘chirildi.");
+              }
+            }
             if (action.dataset.action === "save-settlement") {
               const sellerId = Number(action.dataset.seller);
               const input = document.querySelector(`#received-${sellerId}`);
@@ -1134,6 +1144,7 @@
         state.stores = await api("/api/stores");
         const main = state.stores.find((s) => s.kind === "main") || state.stores[0];
         const branch = state.stores.find((s) => s.kind === "branch");
+        state.mainStoreId = main && main.kind === "main" ? main.id : null;
         const sellerStore = state.me && state.me.role === "seller"
           ? state.stores.find((store) => store.id === state.me.store_id)
           : null;
@@ -1150,10 +1161,13 @@
       async function loadBranch() {
         if (!state.branchId) { notify("Sizga do‘kon biriktirilmagan."); return; }
         const seller = state.me && state.me.role === "seller";
-        const [items, products, today] = await Promise.all([
+        const [items, products, today, mainProducts] = await Promise.all([
           api(`/api/items?store_id=${state.branchId}`),
           api(`/api/products?store_id=${state.branchId}`),
           seller ? api("/api/my/sales/today") : Promise.resolve(null),
+          !seller && state.mainStoreId
+            ? api(`/api/products?store_id=${state.mainStoreId}`)
+            : Promise.resolve([]),
         ]);
         state.items = items;
         if (today) {
@@ -1188,10 +1202,14 @@
           const price = pr.sale_price ? ` · ${new Intl.NumberFormat('uz-UZ', {maximumFractionDigits:0}).format(pr.sale_price)} so'm` : '';
           return `<option value="${pr.id}">${safe(pr.name)}${safe(dim)}${safe(price)} (${qty(pr.quantity)} ${safe(pr.unit)})</option>`;
         }).join("");
+        $("#main-carpet-names").innerHTML = mainProducts
+          .map((product) => `<option value="${safe(product.name)}"></option>`)
+          .join("");
         updateRestockInfo();
       }
       async function loadUsers() {
         const users = await api("/api/users");
+        state.users = users;
         $("#users-body").innerHTML = users.map((u) => `
           <tr>
             <td data-label="Ism">${safe(u.display_name || "—")}</td>
@@ -1200,7 +1218,7 @@
             <td data-label="Do‘kon">${safe(u.store_name || "—")}</td>
             <td data-label="Qarzi">${u.outstanding_debt ? money(u.outstanding_debt) : "—"}</td>
             <td data-label="Holati">${u.is_active ? "Faol" : "🚫 Bloklangan"}</td>
-            <td data-label="Amal">${u.role === "admin" ? "👑" : `<button class="button small" data-action="toggle-user" data-id="${u.id}">${u.is_active ? "Bloklash" : "Faollashtirish"}</button>`}</td>
+            <td data-label="Amal">${u.role === "admin" ? "👑" : `<div class="actions"><button class="button small" data-action="toggle-user" data-id="${u.id}">${u.is_active ? "Bloklash" : "Faollashtirish"}</button><button class="button small danger" data-action="delete-user" data-id="${u.id}">🗑 O‘chirish</button></div>`}</td>
           </tr>`).join("");
       }
       async function loadSettlements() {

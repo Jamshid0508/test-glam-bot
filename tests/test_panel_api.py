@@ -122,6 +122,38 @@ class PanelApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("FilialGilam", names)
         self.assertNotIn("AsosiyGilam", names)
 
+    async def test_api_delete_user_requires_admin_and_protects_admin(self):
+        admin = bot.create_user("admin1", "parol123", "Boss", "admin")
+        seller = bot.create_user("sotuvchi", "parol123", "Ali", "seller")
+        seller_actor = bot.create_user("sotuvchi2", "parol123", "Vali", "seller")
+
+        seller_login = await app.api_login(
+            make_request({"login": seller_actor["login"], "password": "parol123"})
+        )
+        seller_request = make_request(
+            cookie=seller_login.headers["set-cookie"].split(";")[0],
+            method="DELETE",
+        )
+        with self.assertRaises(HTTPException) as raised:
+            await app.api_delete_user(seller["id"], seller_request)
+        self.assertEqual(raised.exception.status_code, 403)
+
+        admin_login = await app.api_login(
+            make_request({"login": admin["login"], "password": "parol123"})
+        )
+        admin_request = make_request(
+            cookie=admin_login.headers["set-cookie"].split(";")[0],
+            method="DELETE",
+        )
+        with self.assertRaises(HTTPException) as raised:
+            await app.api_delete_user(admin["id"], admin_request)
+        self.assertEqual(raised.exception.status_code, 403)
+        self.assertIsNotNone(bot.get_user(admin["id"]))
+
+        result = await app.api_delete_user(seller["id"], admin_request)
+        self.assertEqual(result, {"ok": True})
+        self.assertIsNone(bot.get_user(seller["id"]))
+
     async def test_seller_panel_is_store_scoped_and_hides_admin_data(self):
         branch = bot.branch_store()
         seller = bot.create_user(

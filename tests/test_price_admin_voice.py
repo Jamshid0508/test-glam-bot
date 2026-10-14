@@ -259,6 +259,17 @@ class AdminBlockProtectionTests(unittest.IsolatedAsyncioTestCase):
         bot.set_user_active(seller["id"], True)
         self.assertTrue(bot.get_user(seller["id"])["is_active"])
 
+    def test_delete_user_rejects_admin(self):
+        admin = bot.create_user("boss", "parol123", "Boss", "admin")
+        seller = bot.create_user("sotuvchi", "parol123", "Ali", "seller")
+
+        with self.assertRaises(ValueError):
+            bot.delete_user(admin["id"])
+        self.assertIsNotNone(bot.get_user(admin["id"]))
+
+        self.assertTrue(bot.delete_user(seller["id"]))
+        self.assertIsNone(bot.get_user(seller["id"]))
+
     async def test_users_toggle_callback_protects_admin(self):
         admin = bot.create_user("boss", "parol123", "Boss", "admin")
         query = SimpleNamespace(
@@ -287,6 +298,44 @@ class AdminBlockProtectionTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertNotIn(f"usr:toggle:{admin['id']}", callbacks)
         self.assertIn(f"usr:toggle:{seller['id']}", callbacks)
+        self.assertNotIn(f"usr:delete:{admin['id']}", callbacks)
+        self.assertIn(f"usr:delete:{seller['id']}", callbacks)
+
+    async def test_users_delete_callback_requires_confirmation(self):
+        seller = bot.create_user("sotuvchi", "parol123", "Ali", "seller")
+        query = SimpleNamespace(
+            data=f"usr:delete:{seller['id']}",
+            answer=AsyncMock(),
+            edit_message_text=AsyncMock(),
+        )
+        await bot.users_callback(
+            SimpleNamespace(callback_query=query), SimpleNamespace(user_data={})
+        )
+
+        self.assertIsNotNone(bot.get_user(seller["id"]))
+        self.assertIn("tasdiqlaysizmi", query.edit_message_text.await_args.args[0])
+        markup = query.edit_message_text.await_args.kwargs["reply_markup"]
+        callbacks = [
+            button.callback_data
+            for row in markup.inline_keyboard
+            for button in row
+        ]
+        self.assertIn(f"usr:delete_confirm:{seller['id']}", callbacks)
+        self.assertIn("usr:delete_cancel", callbacks)
+
+    async def test_users_delete_confirmation_deletes_seller(self):
+        seller = bot.create_user("sotuvchi", "parol123", "Ali", "seller")
+        query = SimpleNamespace(
+            data=f"usr:delete_confirm:{seller['id']}",
+            answer=AsyncMock(),
+            edit_message_text=AsyncMock(),
+        )
+        await bot.users_callback(
+            SimpleNamespace(callback_query=query), SimpleNamespace(user_data={})
+        )
+
+        self.assertIsNone(bot.get_user(seller["id"]))
+        self.assertIn("Foydalanuvchi o'chirildi", query.edit_message_text.await_args.args[0])
 
     async def test_api_toggle_user_rejects_admin(self):
         admin = bot.create_user("boss", "parol123", "Boss", "admin")

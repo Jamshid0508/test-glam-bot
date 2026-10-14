@@ -60,12 +60,23 @@ class MultiStoreTests(unittest.TestCase):
     def test_branch_items_numbers_and_sale_by_number(self):
         branch = bot.branch_store()
         # Same name as a main-store product must not collide
-        bot.inventory_create("Sag", "dona", 5, 100_000, 150_000)
+        main_item = bot.inventory_create(
+            "Sag", "dona", 1, 100_000, 150_000,
+            item_numbers=["QG-001"],
+        )
         branch_item = bot.inventory_create(
             "Sag", "dona", 2, 100_000, 150_000,
             store_id=branch["id"], item_numbers=["QG-001", "QG-002"],
         )
         self.assertEqual(branch_item["store_id"], branch["id"])
+        self.assertEqual(
+            bot.get_item_by_number(bot.main_store_id(), "QG-001")["inventory_id"],
+            main_item["id"],
+        )
+        self.assertEqual(
+            bot.get_item_by_number(branch["id"], "QG-001")["inventory_id"],
+            branch_item["id"],
+        )
         with self.assertRaises(ValueError):
             bot.add_inventory_items(branch_item["id"], branch["id"], ["QG-001"])
 

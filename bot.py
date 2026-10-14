@@ -759,6 +759,25 @@ def set_user_active(user_id: int, active: bool, conn=None):
             conn.close()
 
 
+def delete_user(user_id: int, conn=None):
+    close = False
+    if conn is None:
+        conn = db()
+        close = True
+    try:
+        target = conn.execute(
+            "SELECT role FROM users WHERE id=?", (user_id,)
+        ).fetchone()
+        if target and target["role"] == "admin":
+            raise ValueError("Adminni o'chirib bo'lmaydi")
+        cursor = conn.execute("DELETE FROM users WHERE id=?", (user_id,))
+        conn.commit()
+        return cursor.rowcount > 0
+    finally:
+        if close:
+            conn.close()
+
+
 def ensure_admin_from_env(conn=None):
     """Creates the first admin from ADMIN_LOGIN / ADMIN_PASSWORD env vars
     when no admin exists yet. The owner can then manage users in the bot."""
@@ -2840,9 +2859,26 @@ def users_list_markup():
             continue
         label = f"{'🚫 Bloklash' if u['is_active'] else '✅ Faollashtirish'}: {u['login']}"
         buttons.append(
-            [InlineKeyboardButton(label, callback_data=f"usr:toggle:{u['id']}")]
+            [
+                InlineKeyboardButton(label, callback_data=f"usr:toggle:{u['id']}"),
+                InlineKeyboardButton(
+                    f"🗑 O'chirish: {u['login']}",
+                    callback_data=f"usr:delete:{u['id']}",
+                ),
+            ]
         )
     return InlineKeyboardMarkup(buttons)
+
+
+def user_delete_confirmation_markup(user_id: int):
+    return InlineKeyboardMarkup(
+        [[
+            InlineKeyboardButton(
+                "🗑 Ha, o'chirish", callback_data=f"usr:delete_confirm:{user_id}"
+            ),
+            InlineKeyboardButton("Bekor qilish", callback_data="usr:delete_cancel"),
+        ]]
+    )
 
 
 async def users_list_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2874,6 +2910,52 @@ async def users_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if target:
             set_user_active(user_id, not target["is_active"])
         await query.edit_message_text(users_list_text(), reply_markup=users_list_markup())
+        return
+    if data.startswith("usr:delete:"):
+        user_id = int(data.rsplit(":", 1)[1])
+        target = get_user(user_id)
+        if not target:
+            await query.edit_message_text(
+                users_list_text(), reply_markup=users_list_markup()
+            )
+            return
+        if target["role"] == "admin":
+            await query.edit_message_text(
+                "⚠️ Adminni o'chirib bo'lmaydi.\n\n" + users_list_text(),
+                reply_markup=users_list_markup(),
+            )
+            return
+        await query.edit_message_text(
+            f"⚠️ «{target.get('display_name') or target['login']}» "
+            f"(@{target['login']}) foydalanuvchisini o'chirishni tasdiqlaysizmi?",
+            reply_markup=user_delete_confirmation_markup(user_id),
+        )
+        return
+    if data.startswith("usr:delete_confirm:"):
+        user_id = int(data.rsplit(":", 1)[1])
+        try:
+            deleted = delete_user(user_id)
+        except ValueError:
+            await query.edit_message_text(
+                "⚠️ Adminni o'chirib bo'lmaydi.\n\n" + users_list_text(),
+                reply_markup=users_list_markup(),
+            )
+            return
+        if not deleted:
+            await query.edit_message_text(
+                "⚠️ Foydalanuvchi topilmadi.\n\n" + users_list_text(),
+                reply_markup=users_list_markup(),
+            )
+            return
+        await query.edit_message_text(
+            "✅ Foydalanuvchi o'chirildi.\n\n" + users_list_text(),
+            reply_markup=users_list_markup(),
+        )
+        return
+    if data == "usr:delete_cancel":
+        await query.edit_message_text(
+            users_list_text(), reply_markup=users_list_markup()
+        )
         return
     if data.startswith("usr:role:"):
         wizard = context.user_data.get("usr_add") or {}

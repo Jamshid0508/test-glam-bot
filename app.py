@@ -1154,6 +1154,23 @@ async def api_toggle_user(user_id: int, request: Request):
     return bot.get_user(user_id)
 
 
+@app.delete("/api/users/{user_id}")
+async def api_delete_user(user_id: int, request: Request):
+    require_admin(request)
+    target = bot.get_user(user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="Foydalanuvchi topilmadi")
+    if target["role"] == "admin":
+        raise HTTPException(status_code=403, detail="Adminni o'chirib bo'lmaydi")
+    try:
+        deleted = bot.delete_user(user_id)
+    except ValueError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Foydalanuvchi topilmadi")
+    return {"ok": True}
+
+
 @app.get("/api/settlements")
 async def api_settlements(request: Request, store_id: int | None = None, day: str | None = None):
     require_admin(request)
