@@ -554,6 +554,20 @@ async def api_products(request: Request, archived: bool = False, store_id: int |
     ]
 
 
+@app.get("/api/main-product-names")
+async def api_main_product_names(request: Request):
+    require_panel_user(request)
+    main_store_id = bot.main_store_id()
+    return [
+        str(product["name"])
+        for product in bot.inventory_list_full(
+            include_archived=False,
+            limit=1000,
+            store_id=main_store_id,
+        )
+    ]
+
+
 @app.get("/api/products/export")
 async def api_products_export(request: Request, archived: bool = True):
     require_admin(request)

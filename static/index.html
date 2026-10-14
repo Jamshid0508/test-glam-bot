@@ -512,7 +512,7 @@
       const initData = tg ? tg.initData : "";
       const localHost = ["localhost", "127.0.0.1", "::1"].includes(location.hostname);
       const localTest = !initData && localHost;
-      const state = { products: [], sales: [], summary: null, start: "", end: "", usd_rate: 12850, stores: [], storeId: null, branchId: null, mainStoreId: null, me: null, items: [], globalStore: "", branchProducts: [], users: [] };
+      const state = { products: [], sales: [], summary: null, start: "", end: "", usd_rate: 12850, stores: [], storeId: null, branchId: null, me: null, items: [], globalStore: "", branchProducts: [], users: [] };
       const $ = (selector) => document.querySelector(selector);
       const money = (value) => value == null ? "—" : `${new Intl.NumberFormat("uz-UZ", { maximumFractionDigits: 0 }).format(value)} so‘m`;
       const qty = (value) => new Intl.NumberFormat("uz-UZ", { maximumFractionDigits: 2 }).format(Number(value || 0));
@@ -1144,7 +1144,6 @@
         state.stores = await api("/api/stores");
         const main = state.stores.find((s) => s.kind === "main") || state.stores[0];
         const branch = state.stores.find((s) => s.kind === "branch");
-        state.mainStoreId = main && main.kind === "main" ? main.id : null;
         const sellerStore = state.me && state.me.role === "seller"
           ? state.stores.find((store) => store.id === state.me.store_id)
           : null;
@@ -1161,13 +1160,11 @@
       async function loadBranch() {
         if (!state.branchId) { notify("Sizga do‘kon biriktirilmagan."); return; }
         const seller = state.me && state.me.role === "seller";
-        const [items, products, today, mainProducts] = await Promise.all([
+        const [items, products, today, mainProductNames] = await Promise.all([
           api(`/api/items?store_id=${state.branchId}`),
           api(`/api/products?store_id=${state.branchId}`),
           seller ? api("/api/my/sales/today") : Promise.resolve(null),
-          !seller && state.mainStoreId
-            ? api(`/api/products?store_id=${state.mainStoreId}`)
-            : Promise.resolve([]),
+          api("/api/main-product-names"),
         ]);
         state.items = items;
         if (today) {
@@ -1202,8 +1199,8 @@
           const price = pr.sale_price ? ` · ${new Intl.NumberFormat('uz-UZ', {maximumFractionDigits:0}).format(pr.sale_price)} so'm` : '';
           return `<option value="${pr.id}">${safe(pr.name)}${safe(dim)}${safe(price)} (${qty(pr.quantity)} ${safe(pr.unit)})</option>`;
         }).join("");
-        $("#main-carpet-names").innerHTML = mainProducts
-          .map((product) => `<option value="${safe(product.name)}"></option>`)
+        $("#main-carpet-names").innerHTML = mainProductNames
+          .map((name) => `<option value="${safe(name)}"></option>`)
           .join("");
         updateRestockInfo();
       }

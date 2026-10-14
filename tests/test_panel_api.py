@@ -254,6 +254,32 @@ class PanelApiTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(restocked["quantity"], 2)
 
+    async def test_seller_can_get_main_store_product_names_for_branch_add(self):
+        branch = bot.branch_store()
+        bot.inventory_create("Aziya 3x3", "dona", 1, 100_000, 150_000)
+        bot.inventory_create("Qizil Gul", "dona", 1, 100_000, 150_000)
+        bot.inventory_create(
+            "Faqat Filial", "dona", 1, 100_000, 150_000, store_id=branch["id"]
+        )
+        seller = bot.create_user(
+            "branch-name-seller",
+            "parol123",
+            "Sotuvchi",
+            "seller",
+            branch["id"],
+        )
+        login = await app.api_login(
+            make_request({"login": seller["login"], "password": "parol123"})
+        )
+        seller_request = make_request(
+            cookie=login.headers["set-cookie"].split(";")[0],
+            method="GET",
+        )
+
+        names = await app.api_main_product_names(seller_request)
+
+        self.assertEqual(names, ["Aziya 3x3", "Qizil Gul"])
+
     async def test_telegram_webapp_auth_resolves_linked_seller_and_store(self):
         token = "123456:local-test-token"
         branch = bot.branch_store()
